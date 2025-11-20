@@ -1,0 +1,205 @@
+{
+  "opening": null,
+  "white": 3449915249,
+  "draws": 270721872,
+  "black": 3209949477,
+  "moves": [
+    {
+      "uci": "e2e4",
+      "san": "e4",
+      "averageRating": 1606,
+      "white": 2006565771,
+      "draws": 155297016,
+      "black": 1892426387,
+      "game": null,
+      "opening": {
+        "eco": "B00",
+        "name": "King's Pawn Game"
+      }
+    },
+    {
+      "uci": "d2d4",
+      "san": "d4",
+      "averageRating": 1680,
+      "white": 877268247,
+      "draws": 70520293,
+      "black": 791327578,
+      "game": null,
+      "opening": {
+        "eco": "A40",
+        "name": "Queen's Pawn Game"
+      }
+    },
+    {
+      "uci": "g1f3",
+      "san": "Nf3",
+      "averageRating": 1783,
+      "white": 125801967,
+      "draws": 10700025,
+      "black": 109732911,
+      "game": null,
+      "opening": {
+        "eco": "A04",
+        "name": "Zukertort Opening"
+      }
+    },
+    {
+      "uci": "c2c4",
+      "san": "c4",
+      "averageRating": 1755,
+      "white": 114414491,
+      "draws": 9374007,
+      "black": 101630797,
+      "game": null,
+      "opening": {
+        "eco": "A10",
+        "name": "English Opening"
+      }
+    },
+    {
+      "uci": "e2e3",
+      "san": "e3",
+      "averageRating": 1566,
+      "white": 73047884,
+      "draws": 5352254,
+      "black": 74708593,
+      "game": null,
+      "opening": {
+        "eco": "A00",
+        "name": "Van't Kruijs Opening"
+      }
+    },
+    {
+      "uci": "g2g3",
+      "san": "g3",
+      "averageRating": 1707,
+      "white": 60361259,
+      "draws": 4716091,
+      "black": 55182147,
+      "game": null,
+      "opening": {
+        "eco": "A00",
+        "name": "Hungarian Opening"
+      }
+    },
+    {
+      "uci": "b2b3",
+      "san": "b3",
+      "averageRating": 1754,
+      "white": 55111178,
+      "draws": 4041875,
+      "black": 50102692,
+      "game": null,
+      "opening": {
+        "eco": "A01",
+        "name": "Nimzo-Larsen Attack"
+      }
+    },
+    {
+      "uci": "d2d3",
+      "san": "d3",
+      "averageRating": 1667,
+      "white": 31400022,
+      "draws": 2385731,
+      "black": 31571375,
+      "game": null,
+      "opening": {
+        "eco": "A00",
+        "name": "Mieses Opening"
+      }
+    },
+    {
+      "uci": "f2f4",
+      "san": "f4",
+      "averageRating": 1736,
+      "white": 32113960,
+      "draws": 2435457,
+      "black": 30150674,
+      "game": null,
+      "opening": {
+        "eco": "A02",
+        "name": "Bird Opening"
+      }
+    },
+    {
+      "uci": "b1c3",
+      "san": "Nc3",
+      "averageRating": 1670,
+      "white": 21016713,
+      "draws": 1581614,
+      "black": 19910345,
+      "game": null,
+      "opening": {
+        "eco": "A00",
+        "name": "Van Geet Opening"
+      }
+    },
+    {
+      "uci": "b2b4",
+      "san": "b4",
+      "averageRating": 1686,
+      "white": 15152277,
+      "draws": 1094607,
+      "black": 13195064,
+      "game": null,
+      "opening": {
+        "eco": "A00",
+        "name": "Polish Opening"
+      }
+    },
+    {
+      "uci": "c2c3",
+      "san": "c3",
+      "averageRating": 1676,
+      "white": 10857225,
+      "draws": 791336,
+      "black": 10685028,
+      "game": null,
+      "opening": {
+        "eco": "A00",
+        "name": "Saragossa Opening"
+      }
+    },
+    {
+      "uci": "g2g4",
+      "san": "g4",
+      "averageRating": 1613,
+      "white": 9765711,
+      "draws": 716104,
+      "black": 9657781,
+      "game": null,
+      "opening": {
+        "eco": "A00",
+        "name": "Grob Opening"
+      }
+    },
+    {
+      "uci": "f2f3",
+      "san": "f3",
+      "averageRating": 1655,
+      "white": 4260115,
+      "draws": 355153,
+      "black": 4928124,
+      "game": null,
+      "opening": {
+        "eco": "A00",
+        "name": "Barnes Opening"
+      }
+    },
+    {
+      "uci": "h2h4",
+      "san": "h4",
+      "averageRating": 1465,
+      "white": 3502847,
+      "draws": 430896,
+      "black": 4370001,
+      "game": null,
+      "opening": {
+        "eco": "A00",
+        "name": "Kádas Opening"
+      }
+    }
+  ],
+  "recentGames": [],
+  "topGames": []
+}

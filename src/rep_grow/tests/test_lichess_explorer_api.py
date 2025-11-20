@@ -1,6 +1,35 @@
-from rep_grow.lichess_explorer_api import LichessExplorerApi
+from rep_grow.lichess_explorer_api import LichessExplorerApi, ExplorerResponse
 import pytest
 import httpx
+
+
+def _fake_api_with_moves(move_totals: list[tuple[str, int]]) -> LichessExplorerApi:
+    api = LichessExplorerApi(fen="test")
+    moves: list[dict] = []
+    recent_games: list[dict] = []
+    top_games: list[dict] = []
+    for idx, (san, total) in enumerate(move_totals):
+        moves.append(
+            {
+                "uci": f"move{idx}",
+                "san": san,
+                "white": total,
+                "draws": 0,
+                "black": 0,
+                "opening": None,
+            }
+        )
+    aggregate = sum(total for _, total in move_totals)
+    api._response = ExplorerResponse(  # type: ignore[attr-defined]
+        opening=None,
+        white=aggregate,
+        draws=0,
+        black=0,
+        moves=moves,
+        recentGames=recent_games,
+        topGames=top_games,
+    )
+    return api
 
 
 def test_params():
@@ -108,7 +137,7 @@ async def test_top_p_pct_moves():
 
     _ = await api.raw_explorer()
 
-    top_moves = api.top_p_pct_moves(pct=90.0)
+    top_moves = api.top_p_pct_moves(pct=90.0, max_moves=None, min_game_share=0.0)
 
     assert isinstance(top_moves, list), f"Expected list, got {type(top_moves)}"
     assert len(top_moves) > 0, "Expected at least one move in top moves"
@@ -122,3 +151,62 @@ async def test_top_p_pct_moves():
     assert pct_covered >= 90.0, (
         f"Expected at least 90% coverage, got {pct_covered:.2f}%"
     )
+
+
+def test_top_p_pct_moves_limits_tail_and_sorts():
+    api = _fake_api_with_moves(
+        [
+            ("Nc3", 5),
+            ("e4", 50),
+            ("d4", 25),
+            ("c4", 10),
+            ("g3", 8),
+            ("b3", 2),
+        ]
+    )
+
+    top_moves = api.top_p_pct_moves(pct=90.0)
+
+    totals = [entry["total"] for entry in top_moves]
+    assert totals == sorted(totals, reverse=True)
+    assert len(top_moves) <= 8
+
+    total_games = sum(total for _, total in api.totals)
+    covered = sum(entry["total"] for entry in top_moves)
+    assert covered / total_games >= 0.9
+
+
+def test_top_p_pct_moves_obeys_max_moves_override():
+    api = _fake_api_with_moves(
+        [
+            ("e4", 40),
+            ("d4", 30),
+            ("c4", 20),
+            ("Nf3", 10),
+        ]
+    )
+
+    top_moves = api.top_p_pct_moves(pct=99.0, max_moves=2)
+
+    assert len(top_moves) == 2
+    assert [entry["move"] for entry in top_moves] == ["e4", "d4"]
+
+
+def test_top_p_pct_moves_skips_tiny_tail_when_pct_met():
+    api = _fake_api_with_moves(
+        [
+            ("e4", 40),
+            ("d4", 30),
+            ("c4", 20),
+            ("Nf3", 10),
+        ]
+    )
+
+    top_moves = api.top_p_pct_moves(pct=70.0, min_game_share=0.05)
+
+    assert [entry["move"] for entry in top_moves] == ["e4", "d4"]
+
+
+def test_top_p_pct_moves_handles_zero_games():
+    api = _fake_api_with_moves([])
+    assert api.top_p_pct_moves() == []

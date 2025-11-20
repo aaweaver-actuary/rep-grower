@@ -1,26 +1,99 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import os
 import chess
 import chess.pgn as chess_pgn
 
 from dataclasses import dataclass, field
 from typing import Iterable
 
+import httpx
+
 from .stockfish_analysis_api import StockfishAnalysisApi
+from .lichess_explorer_api import LichessExplorerApi
+
+
+logger = logging.getLogger(__name__)
 
 
 def nodes_from_root(rep: Repertoire, node: RepertoireNode) -> int:
     """Return the number of moves from the root to the given node."""
     count = 0
     current = node
+    visited: set[str] = set()
     while not current.is_root:
         if not current.parents:
             break
         parent_fen = next(iter(current.parents))
-        current = rep.nodes_by_fen[parent_fen]
+        if parent_fen in visited:
+            break
+        visited.add(parent_fen)
+        parent = rep.nodes_by_fen.get(parent_fen)
+        if parent is None:
+            break
+        current = parent
         count += 1
     return count
+
+
+def _normalized_board_fen(board: chess.Board) -> str:
+    clone = board.copy(stack=False)
+    clone.halfmove_clock = 0
+    clone.fullmove_number = 1
+    return clone.fen()
+
+
+def canonical_fen(fen: str) -> str:
+    board = chess.Board(fen)
+    return _normalized_board_fen(board)
+
+
+def _env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return default
+
+
+class ExplorerRateLimiter:
+    """Simple concurrency gate with a minimum delay between Explorer calls."""
+
+    def __init__(self, max_concurrent: int = 1, min_delay: float = 1.0):
+        self._max_concurrent = max(1, max_concurrent)
+        self._min_delay = max(0.0, min_delay)
+        self._semaphore: asyncio.Semaphore | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+
+    async def __aenter__(self):
+        loop = asyncio.get_running_loop()
+        if self._semaphore is None or loop is not self._loop:
+            self._semaphore = asyncio.Semaphore(self._max_concurrent)
+            self._loop = loop
+        await self._semaphore.acquire()
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        try:
+            if self._min_delay:
+                await asyncio.sleep(self._min_delay)
+        finally:
+            assert self._semaphore is not None
+            self._semaphore.release()
 
 
 @dataclass
@@ -58,10 +131,12 @@ class Repertoire:
         if not isinstance(self.initial_san, str):
             self.initial_san = ""
         self.game.setup(self.board)
-        root = RepertoireNode(fen=self.board.fen(), move=None, pgn_nodes=[self.game])
-        self.nodes_by_fen: dict[str, RepertoireNode] = {root.fen: root}
+        root_fen = _normalized_board_fen(self.board)
+        root = RepertoireNode(fen=root_fen, move=None, pgn_nodes=[self.game])
+        self.nodes_by_fen: dict[str, RepertoireNode] = {root_fen: root}
         self.root_node = root
         self.current_node = root
+        self._explorer_rate_limiter: ExplorerRateLimiter | None = None
 
     @classmethod
     def from_str(cls, side: str, initial_san: str):
@@ -147,11 +222,13 @@ class Repertoire:
         child_fen: str,
         pgn_node: chess_pgn.GameNode,
     ) -> tuple[RepertoireNode, chess_pgn.GameNode]:
-        child = self.nodes_by_fen.get(child_fen)
+        canonical_child_fen = canonical_fen(child_fen)
+        child = self.nodes_by_fen.get(canonical_child_fen)
         if child is None:
-            child = RepertoireNode(fen=child_fen, move=move)
-            self.nodes_by_fen[child_fen] = child
-        child.add_parent(parent.fen)
+            child = RepertoireNode(fen=canonical_child_fen, move=move)
+            self.nodes_by_fen[canonical_child_fen] = child
+        if child is not self.root_node:
+            child.add_parent(parent.fen)
         parent.add_child(move, child)
         child_pgn_node = self._ensure_pgn_variation(pgn_node, move)
         if child_pgn_node not in child.pgn_nodes:
@@ -160,6 +237,16 @@ class Repertoire:
 
     def _mainline_node(self, node: RepertoireNode | None = None) -> chess_pgn.GameNode:
         return self._pgn_node_for(node or self.current_node)
+
+    def _get_explorer_limiter(self) -> ExplorerRateLimiter:
+        if self._explorer_rate_limiter is None:
+            concurrency = max(1, _env_int("REP_GROW_EXPLORER_MAX_CONCURRENCY", 1))
+            delay = max(0.0, _env_float("REP_GROW_EXPLORER_MIN_DELAY", 1.0))
+            self._explorer_rate_limiter = ExplorerRateLimiter(
+                max_concurrent=concurrency,
+                min_delay=delay,
+            )
+        return self._explorer_rate_limiter
 
     async def add_engine_variations_for_node(
         self,
@@ -240,4 +327,143 @@ class Repertoire:
         workers = [asyncio.create_task(worker()) for _ in range(max_concurrency)]
         await queue.join()
         await asyncio.gather(*workers, return_exceptions=True)
+        return results
+
+    async def add_explorer_variations_for_node(
+        self,
+        node: RepertoireNode | None = None,
+        pct: float = 95.0,
+        graph_lock: asyncio.Lock | None = None,
+    ) -> list[str]:
+        """Attach Lichess Explorer moves covering pct% of games at the node."""
+        target_node = node or self.current_node
+        api = LichessExplorerApi(fen=target_node.fen)
+        limiter = self._get_explorer_limiter()
+        async with limiter:
+            await api.raw_explorer()
+        moves = api.top_p_pct_moves(pct)
+
+        pgn_node = self._pgn_node_for(target_node)
+        existing_moves = {var.move for var in pgn_node.variations}
+        added_moves: list[str] = []
+
+        for entry in moves:
+            san_move = entry.get("move")
+            if not san_move:
+                continue
+            board_copy = chess.Board(target_node.fen)
+            try:
+                move = board_copy.parse_san(san_move)
+            except ValueError:
+                continue
+            if move in existing_moves:
+                continue
+            board_copy.push(move)
+            if graph_lock:
+                async with graph_lock:
+                    self._link_child(target_node, move, board_copy.fen(), pgn_node)
+            else:
+                self._link_child(target_node, move, board_copy.fen(), pgn_node)
+            existing_moves.add(move)
+            added_moves.append(san_move)
+
+        return added_moves
+
+    async def add_explorer_variations(
+        self,
+        nodes: Iterable[RepertoireNode] | None = None,
+        pct: float = 95.0,
+        max_concurrency: int | None = None,
+    ) -> dict[str, list[str]]:
+        """Expand nodes by fetching explorer moves via a worker queue."""
+        targets = list(nodes or self.leaf_nodes)
+        if not targets:
+            return {}
+
+        max_concurrency = max_concurrency or min(4, len(targets))
+        graph_lock = asyncio.Lock()
+        queue: asyncio.Queue[RepertoireNode] = asyncio.Queue()
+        for node in targets:
+            queue.put_nowait(node)
+
+        results: dict[str, list[str]] = {}
+
+        async def worker() -> None:
+            while True:
+                try:
+                    node = queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                try:
+                    moves = await self.add_explorer_variations_for_node(
+                        node=node,
+                        pct=pct,
+                        graph_lock=graph_lock,
+                    )
+                    results[node.fen] = moves
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    if isinstance(exc, httpx.HTTPStatusError):
+                        status = (
+                            exc.response.status_code
+                            if exc.response is not None
+                            else "?"
+                        )
+                        logger.warning(
+                            "Explorer API error (%s) while expanding %s: %s",
+                            status,
+                            node.fen,
+                            exc,
+                        )
+                    else:
+                        logger.warning(
+                            "Explorer expansion failed for %s: %s", node.fen, exc
+                        )
+                    results[node.fen] = []
+                finally:
+                    queue.task_done()
+
+        workers = [asyncio.create_task(worker()) for _ in range(max_concurrency)]
+        await queue.join()
+        await asyncio.gather(*workers, return_exceptions=True)
+        return results
+
+    async def expand_leaves_by_turn(
+        self,
+        *,
+        multi_pv: int | None = None,
+        pct: float = 95.0,
+        max_concurrency: int | None = None,
+    ) -> dict[str, list[str]]:
+        """Expand leaf nodes, routing player turns to the engine and others to explorer."""
+
+        player_nodes: list[RepertoireNode] = []
+        opponent_nodes: list[RepertoireNode] = []
+
+        for node in self.leaf_nodes:
+            board = chess.Board(node.fen)
+            if board.turn == self.side:
+                player_nodes.append(node)
+            else:
+                opponent_nodes.append(node)
+
+        results: dict[str, list[str]] = {}
+
+        if player_nodes:
+            engine_results = await self.add_engine_variations(
+                nodes=player_nodes,
+                multi_pv=multi_pv,
+                max_concurrency=max_concurrency,
+            )
+            results.update(engine_results)
+
+        if opponent_nodes:
+            explorer_results = await self.add_explorer_variations(
+                nodes=opponent_nodes,
+                pct=pct,
+                max_concurrency=max_concurrency,
+            )
+            results.update(explorer_results)
+
         return results

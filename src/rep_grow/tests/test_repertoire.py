@@ -1,4 +1,4 @@
-from rep_grow.repertoire import Repertoire, RepertoireNode
+from rep_grow.repertoire import Repertoire, RepertoireNode, canonical_fen
 import chess
 import pytest
 
@@ -20,6 +20,30 @@ def fake_stockfish(monkeypatch):
 
     monkeypatch.setattr("rep_grow.repertoire.StockfishAnalysisApi", FakeStockfish)
     return FakeStockfish
+
+
+@pytest.fixture
+def fake_explorer(monkeypatch):
+    class FakeExplorer:
+        moves_for_fen: dict[str, list[dict[str, int]]] = {}
+        default_moves = [
+            {"move": "Nf3", "total": 70},
+            {"move": "Nc3", "total": 30},
+        ]
+
+        def __init__(self, fen, **kwargs):
+            self.fen = fen
+
+        async def raw_explorer(self):
+            return self
+
+        def top_p_pct_moves(self, pct):  # noqa: ARG002
+            moves = self.moves_for_fen.get(self.fen, self.default_moves)
+            return list(moves)
+
+    FakeExplorer.moves_for_fen = {}
+    monkeypatch.setattr("rep_grow.repertoire.LichessExplorerApi", FakeExplorer)
+    return FakeExplorer
 
 
 def test_repertoire_play_initial_moves():
@@ -189,6 +213,60 @@ async def test_parallel_add_engine_variations_processes_all_leaf_nodes(fake_stoc
         assert any(var.move.uci() == "e7e5" for var in pgn_node.variations)
 
 
+@pytest.mark.asyncio
+async def test_add_explorer_variations_for_node_skips_existing_moves(fake_explorer):
+    rep = Repertoire(side=chess.WHITE, initial_san="")
+    rep.play_initial_moves()
+
+    rep.branch_from(rep.root_node, ["Nf3"])
+
+    fake_explorer.moves_for_fen = {
+        rep.root_node.fen: [
+            {"move": "Nf3", "total": 60},
+            {"move": "Nc3", "total": 40},
+        ]
+    }
+
+    added = await rep.add_explorer_variations_for_node(node=rep.root_node, pct=95.0)
+
+    assert added == ["Nc3"]
+    parent_pgn = rep._mainline_node(rep.root_node)
+    board = chess.Board(rep.root_node.fen)
+    assert any(board.san(var.move) == "Nc3" for var in parent_pgn.variations)
+
+
+@pytest.mark.asyncio
+async def test_parallel_add_explorer_variations(fake_explorer):
+    rep = Repertoire(side=chess.WHITE, initial_san="")
+    rep.play_initial_moves()
+
+    node_a = rep.branch_from(rep.root_node, ["e4"])
+    node_b = rep.branch_from(rep.root_node, ["d4"])
+
+    fake_explorer.moves_for_fen = {
+        node_a.fen: [
+            {"move": "c5", "total": 100},
+        ],
+        node_b.fen: [
+            {"move": "d5", "total": 100},
+        ],
+    }
+
+    result = await rep.add_explorer_variations(
+        nodes=[node_a, node_b], pct=90.0, max_concurrency=2
+    )
+
+    assert result[node_a.fen] == ["c5"]
+    assert result[node_b.fen] == ["d5"]
+
+    for fen, moves in result.items():
+        node = rep.nodes_by_fen[fen]
+        pgn_node = rep._mainline_node(node)
+        board = chess.Board(node.fen)
+        for expected in moves:
+            assert any(board.san(var.move) == expected for var in pgn_node.variations)
+
+
 def test_repertoire_graph_deduplicates_transpositions():
     rep = Repertoire(side=chess.WHITE, initial_san="Nc3 Nf6 Nf3")
     rep.play_initial_moves()
@@ -198,8 +276,89 @@ def test_repertoire_graph_deduplicates_transpositions():
     board = chess.Board()
     for san in ("Nf3", "Nf6", "Nc3"):
         board.push(board.parse_san(san))
-    target_fen = board.fen()
+    target_fen = canonical_fen(board.fen())
 
     node: RepertoireNode = rep.nodes_by_fen[target_fen]
     assert len(node.parents) >= 2
     assert node.fen == target_fen
+
+
+def test_canonical_fen_ignores_move_counters():
+    board = chess.Board()
+    board.push(board.parse_san("Nf3"))
+    fen_one = board.fen()
+    board.halfmove_clock = 7
+    board.fullmove_number = 9
+    fen_two = board.fen()
+
+    assert fen_one != fen_two
+    assert canonical_fen(fen_one) == canonical_fen(fen_two)
+
+
+def test_branch_from_reuses_existing_position():
+    rep = Repertoire(side=chess.WHITE, initial_san="")
+    rep.play_initial_moves()
+
+    result = rep.branch_from(rep.root_node, ["Nf3", "Nf6", "Ng1", "Ng8"])
+
+    assert result is rep.root_node
+    assert rep.root_node.is_root is True
+    assert len(rep.nodes_by_fen) == 4
+
+
+@pytest.mark.asyncio
+async def test_expand_leaves_by_turn_routes_moves_by_side(
+    fake_stockfish, fake_explorer
+):
+    fake_stockfish.moves_to_return = ["a2a4"]
+
+    rep = Repertoire(side=chess.WHITE, initial_san="")
+    rep.play_initial_moves()
+
+    opponent_node = rep.branch_from(rep.root_node, ["e4"])
+    player_node = rep.branch_from(rep.root_node, ["Nf3", "d5"])
+
+    fake_explorer.moves_for_fen = {
+        opponent_node.fen: [
+            {"move": "c5", "total": 100},
+        ]
+    }
+
+    await rep.expand_leaves_by_turn()
+
+    player_pgn = rep._mainline_node(player_node)
+    player_board = chess.Board(player_node.fen)
+    assert any(player_board.san(var.move) == "a4" for var in player_pgn.variations)
+
+    opponent_pgn = rep._mainline_node(opponent_node)
+    opponent_board = chess.Board(opponent_node.fen)
+    assert any(opponent_board.san(var.move) == "c5" for var in opponent_pgn.variations)
+
+
+@pytest.mark.asyncio
+async def test_expand_leaves_by_turn_handles_mixed_turn_state(
+    fake_stockfish, fake_explorer
+):
+    fake_stockfish.moves_to_return = ["a2a4"]
+
+    rep = Repertoire(side=chess.WHITE, initial_san="e4")
+    rep.play_initial_moves()
+
+    opponent_node = rep.current_node
+    player_node = rep.branch_from(rep.root_node, ["Nf3", "d5"])
+
+    fake_explorer.moves_for_fen = {
+        opponent_node.fen: [
+            {"move": "Nc6", "total": 200},
+        ]
+    }
+
+    await rep.expand_leaves_by_turn()
+
+    opponent_board = chess.Board(opponent_node.fen)
+    opponent_pgn = rep._mainline_node(opponent_node)
+    assert any(opponent_board.san(var.move) == "Nc6" for var in opponent_pgn.variations)
+
+    player_board = chess.Board(player_node.fen)
+    player_pgn = rep._mainline_node(player_node)
+    assert any(player_board.san(var.move) == "a4" for var in player_pgn.variations)

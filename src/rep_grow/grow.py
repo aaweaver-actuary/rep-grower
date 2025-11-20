@@ -1,5 +1,7 @@
-from .repertoire import Repertoire
 import asyncio
+import chess
+
+from .repertoire import Repertoire
 
 
 def main():
@@ -10,15 +12,25 @@ def main():
     print("PGN:")
     print(rep.pgn)
 
-    async def expand_all(iteration: int):
+    async def expand_by_turn(iteration: int):
+        player_nodes = 0
+        opponent_nodes = 0
+        for node in rep.leaf_nodes:
+            board = chess.Board(node.fen)
+            if board.turn == rep.side:
+                player_nodes += 1
+            else:
+                opponent_nodes += 1
         print(
-            f"Iteration {iteration}: Adding engine variations to {len(rep.leaf_nodes)} leaf nodes..."
+            "Iteration {iter}: expanding {player} player-turn and {opp} opponent-turn leaf nodes...".format(
+                iter=iteration, player=player_nodes, opp=opponent_nodes
+            )
         )
-        await rep.add_engine_variations()
+        await rep.expand_leaves_by_turn()
 
-    # Loop over the leaf nodes and add engine variations for each (in parallel)
-    for i in range(3):
-        asyncio.run(expand_all(i + 1))
+    for i in range(10):
+        asyncio.run(expand_by_turn(i + 1))
+
     print("\nFinal PGN with all engine variations:")
     print(rep.pgn)
 

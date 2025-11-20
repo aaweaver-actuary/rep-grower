@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import asyncio
+import random
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 import httpx
 from pydantic import BaseModel, Field
 from typing import Optional, TypedDict
@@ -69,12 +73,69 @@ class LichessExplorerApi:
             "history": self.history,
         }
 
-    async def raw_explorer(self):
+    async def raw_explorer(
+        self,
+        retries: int = 6,
+        backoff: float = 1.0,
+        jitter: float = 0.3,
+    ):
+        """Fetch explorer data with exponential backoff and Retry-After support."""
+
+        last_error: httpx.HTTPStatusError | None = None
+        delay = max(0.1, backoff)
+        transient_statuses = {429, 500, 502, 503, 504}
+
         async with httpx.AsyncClient() as client:
-            response = await client.get(self.BASE_URL, params=self.params)
-            response.raise_for_status()
-            print(response.json())
-            self._response = ExplorerResponse(**response.json())
+            for attempt in range(1, retries + 1):
+                response = await client.get(self.BASE_URL, params=self.params)
+                try:
+                    response.raise_for_status()
+                except httpx.HTTPStatusError as exc:
+                    last_error = exc
+                    status = exc.response.status_code if exc.response else None
+                    if status in transient_statuses and attempt < retries:
+                        wait_time = self._retry_delay_seconds(
+                            exc.response,
+                            delay,
+                            jitter,
+                        )
+                        await asyncio.sleep(wait_time)
+                        delay = min(delay * 2, 30.0)
+                        continue
+                    raise
+                self._response = ExplorerResponse(**response.json())
+                return self._response
+
+        if last_error:
+            raise last_error
+        raise RuntimeError("Explorer API did not return a response")
+
+    @staticmethod
+    def _retry_delay_seconds(
+        response: httpx.Response | None,
+        fallback: float,
+        jitter: float,
+    ) -> float:
+        header_value = response.headers.get("Retry-After") if response else None
+        delay = fallback
+        if header_value is not None:
+            parsed = LichessExplorerApi._parse_retry_after(header_value)
+            if parsed is not None:
+                delay = max(parsed, fallback)
+        return max(0.1, delay + random.uniform(0.0, max(0.0, jitter)))
+
+    @staticmethod
+    def _parse_retry_after(value: str) -> float | None:
+        if value.isdigit():
+            return float(value)
+        try:
+            retry_dt = parsedate_to_datetime(value)
+        except (TypeError, ValueError):
+            return None
+        if retry_dt.tzinfo is None:
+            retry_dt = retry_dt.replace(tzinfo=timezone.utc)
+        delta = (retry_dt - datetime.now(timezone.utc)).total_seconds()
+        return max(0.0, delta)
 
     @property
     def response(self) -> ExplorerResponse:
@@ -95,17 +156,57 @@ class LichessExplorerApi:
             for m in self.response.moves
         ]
 
-    def top_p_pct_moves(self, pct: float = 95.0) -> list[ExplorerMoveTotal]:
-        """Return moves that account for the top pct% of games."""
-        total_games = self.response.totalGames
-        threshold = total_games * (pct / 100.0)
+    def top_p_pct_moves(
+        self,
+        pct: float = 95.0,
+        max_moves: int | None = 8,
+        min_game_share: float = 0.01,
+    ) -> list[ExplorerMoveTotal]:
+        """Return moves that cover pct% of games while capping the tail.
+
+        pct
+            Target coverage expressed as a percentage of the total games.
+        max_moves
+            Optional hard limit to keep the resulting branching factor small.
+            When ``None`` all qualifying moves are returned.
+        min_game_share
+            Lower bound (between 0 and 1) for the share contributed by the
+            move that triggers the stop condition. This prevents dozens of
+            near-zero moves from being appended simply to chase the final few
+            percentage points.
+        """
+
+        totals = sorted(self.totals, key=lambda item: item[1], reverse=True)
+        if not totals:
+            return []
+
+        total_games = sum(total for _, total in totals)
+        if total_games <= 0:
+            return []
+
+        threshold = total_games * max(0.0, pct) / 100.0
         cumulative = 0
         result: list[ExplorerMoveTotal] = []
-        for move, total in self.totals:
+
+        for move, total in totals:
+            if total <= 0:
+                continue
+            share = total / total_games
+            previous_cumulative = cumulative
             cumulative += total
             result.append({"move": move, "total": total})
-            if cumulative >= threshold:
+
+            hit_cap = max_moves is not None and len(result) >= max_moves
+
+            already_met_pct = previous_cumulative >= threshold and threshold > 0
+            if already_met_pct and share < max(0.0, min_game_share):
+                result.pop()
+                cumulative -= total
                 break
+
+            if cumulative >= threshold or hit_cap or threshold == 0:
+                break
+
         return result
 
 

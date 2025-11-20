@@ -14,7 +14,7 @@ class StockfishAnalysisApi:
     """Local Stockfish-backed drop-in replacement for LichessAnalysisApi."""
 
     BASE_URL = "stockfish"  # preserved for strategy compatibility
-    BEST_SCORE_THRESHOLD = 50  # centipawns
+    BEST_SCORE_THRESHOLD = 25  # centipawns
 
     def __init__(
         self,

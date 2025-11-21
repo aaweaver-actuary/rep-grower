@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from pathlib import Path
 import chess
 import chess.pgn as chess_pgn
 
@@ -97,6 +98,18 @@ class ExplorerRateLimiter:
 
 
 @dataclass
+class RepertoireConfig:
+    stockfish_multi_pv: int = 10
+    stockfish_depth: int = 20
+    stockfish_think_time: float | None = None
+    stockfish_engine_path: str | Path | None = "/opt/homebrew/bin/stockfish"
+    stockfish_best_score_threshold: int = 20
+    explorer_pct: float = 90.0
+    explorer_max_moves: int | None = None
+    explorer_min_game_share: float = 0.05
+
+
+@dataclass
 class RepertoireNode:
     fen: str
     move: chess.Move | None = None
@@ -126,10 +139,13 @@ class Repertoire:
     moves: list[str] = field(default_factory=list)
     board: chess.Board = field(default_factory=chess.Board)
     game: chess_pgn.Game = field(default_factory=chess_pgn.Game)
+    config: RepertoireConfig = field(default_factory=RepertoireConfig)
 
     def __post_init__(self):
         if not isinstance(self.initial_san, str):
             self.initial_san = ""
+        if self.config is None:
+            self.config = RepertoireConfig()
         self.game.setup(self.board)
         root_fen = _normalized_board_fen(self.board)
         root = RepertoireNode(fen=root_fen, move=None, pgn_nodes=[self.game])
@@ -139,9 +155,49 @@ class Repertoire:
         self._explorer_rate_limiter: ExplorerRateLimiter | None = None
 
     @classmethod
-    def from_str(cls, side: str, initial_san: str):
+    def from_str(
+        cls,
+        side: str,
+        initial_san: str,
+        *,
+        config: RepertoireConfig | None = None,
+    ):
         color = chess.WHITE if side.lower() == "white" else chess.BLACK
-        return cls(side=color, initial_san=initial_san)
+        return cls(
+            side=color, initial_san=initial_san, config=config or RepertoireConfig()
+        )
+
+    @classmethod
+    def from_pgn_file(
+        cls,
+        side: chess.Color,
+        pgn_path: str | Path,
+        *,
+        config: RepertoireConfig | None = None,
+    ) -> Repertoire:
+        path = Path(pgn_path)
+        with open(path, "r", encoding="utf-8") as handle:
+            game = chess_pgn.read_game(handle)
+        if game is None:
+            raise ValueError(f"No PGN game found in {path}")
+
+        root_board = game.board()
+        board_for_san = root_board.copy(stack=False)
+        mainline_san: list[str] = []
+        for move in game.mainline_moves():
+            mainline_san.append(board_for_san.san(move))
+            board_for_san.push(move)
+
+        rep = cls(
+            side=side,
+            initial_san=" ".join(mainline_san),
+            board=root_board.copy(stack=False),
+            game=game,
+            config=config or RepertoireConfig(),
+        )
+        rep.play_initial_moves()
+        rep._ingest_pgn_tree(game, rep.root_node, root_board.copy(stack=False))
+        return rep
 
     @property
     def fen(self) -> str:
@@ -186,7 +242,7 @@ class Repertoire:
 
     async def get_engine_moves(self, node: RepertoireNode | None = None):
         target_node = node or self.current_node
-        api = StockfishAnalysisApi(target_node.fen, multi_pv=10)
+        api = self._stockfish_api(target_node.fen)
         await api.raw_evaluation()
         return api.best_moves
 
@@ -235,6 +291,21 @@ class Repertoire:
             child.pgn_nodes.append(child_pgn_node)
         return child, child_pgn_node
 
+    def _ingest_pgn_tree(
+        self,
+        pgn_node: chess_pgn.GameNode,
+        rep_node: RepertoireNode,
+        board: chess.Board,
+    ) -> None:
+        for variation in pgn_node.variations:
+            move = variation.move
+            if move is None:
+                continue
+            board.push(move)
+            child, _ = self._link_child(rep_node, move, board.fen(), pgn_node)
+            self._ingest_pgn_tree(variation, child, board)
+            board.pop()
+
     def _mainline_node(self, node: RepertoireNode | None = None) -> chess_pgn.GameNode:
         return self._pgn_node_for(node or self.current_node)
 
@@ -248,6 +319,25 @@ class Repertoire:
             )
         return self._explorer_rate_limiter
 
+    def _stockfish_api(
+        self,
+        fen: str,
+        *,
+        multi_pv: int | None = None,
+        depth: int | None = None,
+    ) -> StockfishAnalysisApi:
+        return StockfishAnalysisApi(
+            fen,
+            multi_pv=multi_pv or self.config.stockfish_multi_pv,
+            engine_path=self.config.stockfish_engine_path,
+            depth=depth or self.config.stockfish_depth,
+            think_time=self.config.stockfish_think_time,
+            best_score_threshold=self.config.stockfish_best_score_threshold,
+        )
+
+    def _resolve_pct(self, pct: float | None) -> float:
+        return pct if pct is not None else self.config.explorer_pct
+
     async def add_engine_variations_for_node(
         self,
         node: RepertoireNode | None = None,
@@ -257,7 +347,7 @@ class Repertoire:
         """Attach engine candidate moves at the given node (default current) as PGN variations."""
 
         target_node = node or self.current_node
-        api = StockfishAnalysisApi(target_node.fen, multi_pv=multi_pv or 10)
+        api = self._stockfish_api(target_node.fen, multi_pv=multi_pv)
         await api.raw_evaluation()
 
         base_board = chess.Board(target_node.fen)
@@ -332,7 +422,7 @@ class Repertoire:
     async def add_explorer_variations_for_node(
         self,
         node: RepertoireNode | None = None,
-        pct: float = 95.0,
+        pct: float | None = None,
         graph_lock: asyncio.Lock | None = None,
     ) -> list[str]:
         """Attach Lichess Explorer moves covering pct% of games at the node."""
@@ -341,7 +431,12 @@ class Repertoire:
         limiter = self._get_explorer_limiter()
         async with limiter:
             await api.raw_explorer()
-        moves = api.top_p_pct_moves(pct)
+        target_pct = self._resolve_pct(pct)
+        moves = api.top_p_pct_moves(
+            pct=target_pct,
+            max_moves=self.config.explorer_max_moves,
+            min_game_share=self.config.explorer_min_game_share,
+        )
 
         pgn_node = self._pgn_node_for(target_node)
         existing_moves = {var.move for var in pgn_node.variations}
@@ -372,7 +467,7 @@ class Repertoire:
     async def add_explorer_variations(
         self,
         nodes: Iterable[RepertoireNode] | None = None,
-        pct: float = 95.0,
+        pct: float | None = None,
         max_concurrency: int | None = None,
     ) -> dict[str, list[str]]:
         """Expand nodes by fetching explorer moves via a worker queue."""
@@ -433,7 +528,7 @@ class Repertoire:
         self,
         *,
         multi_pv: int | None = None,
-        pct: float = 95.0,
+        pct: float | None = None,
         max_concurrency: int | None = None,
     ) -> dict[str, list[str]]:
         """Expand leaf nodes, routing player turns to the engine and others to explorer."""
@@ -467,3 +562,9 @@ class Repertoire:
             results.update(explorer_results)
 
         return results
+
+    def export_pgn(self, filepath: str) -> None:
+        """Export the repertoire PGN to the given file."""
+        with open(filepath, "w", encoding="utf-8") as f:
+            exporter = chess_pgn.FileExporter(f)
+            self.game.accept(exporter)

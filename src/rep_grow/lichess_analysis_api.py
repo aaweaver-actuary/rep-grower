@@ -6,12 +6,19 @@ from pydantic import BaseModel, Field
 
 class LichessAnalysisApi:
     BASE_URL = "https://lichess.org/api/cloud-eval"
-    BEST_SCORE_THRESHOLD = 20  # centipawns
 
-    def __init__(self, fen: str, multi_pv: int = 10, variant: str = "standard"):
+    def __init__(
+        self,
+        fen: str,
+        multi_pv: int = 10,
+        variant: str = "standard",
+        *,
+        best_score_threshold: int = 20,
+    ):
         self.fen = fen
         self.multi_pv = multi_pv
         self.variant = variant
+        self.best_score_threshold = best_score_threshold
         self._response = None
 
     def params(self):
@@ -70,7 +77,7 @@ class LichessAnalysisApi:
 
     @property
     def best_moves(self):
-        return self.moves_within(self.BEST_SCORE_THRESHOLD)
+        return self.moves_within(self.best_score_threshold)
 
 
 class EvalResponse(BaseModel):

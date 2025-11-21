@@ -1,6 +1,41 @@
-from rep_grow.repertoire import Repertoire, RepertoireNode, canonical_fen
+import hashlib
+import io
+
 import chess
+import chess.pgn as chess_pgn
 import pytest
+
+from rep_grow.repertoire import (
+    Repertoire,
+    RepertoireConfig,
+    RepertoireNode,
+    canonical_fen,
+)
+
+PGN_WITH_VARIATIONS = """[Event "?"]
+[Site "?"]
+[Date "????.??.??"]
+[Round "?"]
+[White "?"]
+[Black "?"]
+[Result "*"]
+
+1. e4 e5 2. Nf3 Nc6 3. Nc3 Nf6 (3... Bc5) (3... d6) (3... Bb4) (3... f5) (3... a6) (3... h6) *
+"""
+
+
+def _write_sample_pgn(tmp_path, text: str = PGN_WITH_VARIATIONS) -> str:
+    path = tmp_path / "sample.pgn"
+    path.write_text(text.strip() + "\n", encoding="utf-8")
+    return str(path)
+
+
+def _normalized_pgn(text: str) -> str:
+    game = chess_pgn.read_game(io.StringIO(text))
+    if game is None:
+        raise ValueError("PGN text did not contain a game")
+    exporter = chess_pgn.StringExporter(columns=None)
+    return game.accept(exporter)
 
 
 @pytest.fixture
@@ -9,7 +44,7 @@ def fake_stockfish(monkeypatch):
         BEST_SCORE_THRESHOLD = 50
         moves_to_return = ["g1f3", "d2d4", "c2c4"]
 
-        def __init__(self, fen, multi_pv=10):
+        def __init__(self, fen, multi_pv=10, **kwargs):  # noqa: D401, ARG002
             self.fen = fen
             self.multi_pv = multi_pv
             self.best_moves: list[str] = []
@@ -37,7 +72,7 @@ def fake_explorer(monkeypatch):
         async def raw_explorer(self):
             return self
 
-        def top_p_pct_moves(self, pct):  # noqa: ARG002
+        def top_p_pct_moves(self, pct, max_moves=None, min_game_share=None):  # noqa: ARG002
             moves = self.moves_for_fen.get(self.fen, self.default_moves)
             return list(moves)
 
@@ -78,6 +113,56 @@ def test_repertoire_black_side():
     assert repertoire.board.fen() == expected_fen, (
         f"Expected FEN: {expected_fen}, got: {repertoire.board.fen()}"
     )
+
+
+def test_repertoire_from_pgn_builds_initial_state(tmp_path):
+    path = _write_sample_pgn(tmp_path)
+    config = RepertoireConfig(
+        stockfish_best_score_threshold=25,
+        explorer_pct=95.0,
+    )
+
+    rep = Repertoire.from_pgn_file(chess.WHITE, path, config=config)
+
+    expected_moves = ["e4", "e5", "Nf3", "Nc6", "Nc3", "Nf6"]
+    assert rep.initial_san.split() == expected_moves
+    assert rep.moves == expected_moves
+
+    expected_board = chess.Board()
+    for san in expected_moves:
+        expected_board.push_san(san)
+    assert rep.board.fen() == expected_board.fen()
+
+    board_pre_variations = chess.Board()
+    for san in expected_moves[:-1]:
+        board_pre_variations.push_san(san)
+    node_fen = canonical_fen(board_pre_variations.fen())
+    node = rep.nodes_by_fen[node_fen]
+    child_moves = set(node.children.keys())
+    expected_child_sans = ["Nf6", "Bc5", "d6", "Bb4", "f5", "a6", "h6"]
+    expected_child_uci = {
+        chess.Board(board_pre_variations.fen()).parse_san(san).uci()
+        for san in expected_child_sans
+    }
+    assert expected_child_uci.issubset(child_moves)
+
+
+def test_repertoire_from_pgn_roundtrip_hash(tmp_path):
+    path = _write_sample_pgn(tmp_path)
+    config = RepertoireConfig(
+        stockfish_best_score_threshold=25,
+        explorer_pct=95.0,
+    )
+
+    rep = Repertoire.from_pgn_file(chess.WHITE, path, config=config)
+
+    original_norm = _normalized_pgn(PGN_WITH_VARIATIONS)
+    restored_norm = _normalized_pgn(rep.pgn)
+
+    original_hash = hashlib.sha256(original_norm.encode("utf-8")).hexdigest()
+    restored_hash = hashlib.sha256(restored_norm.encode("utf-8")).hexdigest()
+
+    assert restored_hash == original_hash
 
 
 def test_repertoire_moves_list():
@@ -362,3 +447,55 @@ async def test_expand_leaves_by_turn_handles_mixed_turn_state(
     player_board = chess.Board(player_node.fen)
     player_pgn = rep._mainline_node(player_node)
     assert any(player_board.san(var.move) == "a4" for var in player_pgn.variations)
+
+    @pytest.mark.asyncio
+    async def test_repertoire_config_applies_context(monkeypatch):
+        captured: dict[str, float | int] = {}
+
+        class StubStockfish:
+            def __init__(
+                self,
+                fen,
+                multi_pv,
+                variant="standard",
+                engine_path=None,
+                depth=20,
+                think_time=None,
+                best_score_threshold=20,
+            ):
+                captured["multi_pv"] = multi_pv
+                captured["threshold"] = best_score_threshold
+                self.best_moves: list[str] = []
+
+            async def raw_evaluation(self):  # pragma: no cover - trivial stub
+                return None
+
+        class StubExplorer:
+            def __init__(self, fen, **kwargs):
+                self.fen = fen
+
+            async def raw_explorer(self):  # pragma: no cover - trivial stub
+                return None
+
+            def top_p_pct_moves(self, pct, max_moves=None, min_game_share=None):
+                captured["explorer_pct"] = pct
+                return []
+
+        monkeypatch.setattr("rep_grow.repertoire.StockfishAnalysisApi", StubStockfish)
+        monkeypatch.setattr("rep_grow.repertoire.LichessExplorerApi", StubExplorer)
+
+        config = RepertoireConfig(
+            stockfish_multi_pv=4,
+            stockfish_best_score_threshold=25,
+            explorer_pct=95.0,
+        )
+
+        rep = Repertoire(side=chess.WHITE, initial_san="e4 e5", config=config)
+        rep.play_initial_moves()
+        rep.branch_from(rep.root_node, ["Nf3"])
+
+        await rep.expand_leaves_by_turn()
+
+        assert captured["multi_pv"] == 4
+        assert captured["threshold"] == 25
+        assert captured["explorer_pct"] == 95.0

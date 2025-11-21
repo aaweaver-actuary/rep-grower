@@ -158,7 +158,7 @@ class LichessExplorerApi:
 
     def top_p_pct_moves(
         self,
-        pct: float = 95.0,
+        pct: float = 90.0,
         max_moves: int | None = 8,
         min_game_share: float = 0.01,
     ) -> list[ExplorerMoveTotal]:

@@ -8,13 +8,13 @@ import chess
 import chess.engine
 
 from .lichess_analysis_api import EvalResponse
+from .db import DuckDb, DbQueryContext
 
 
 class StockfishAnalysisApi:
     """Local Stockfish-backed drop-in replacement for LichessAnalysisApi."""
 
     BASE_URL = "stockfish"  # preserved for strategy compatibility
-    BEST_SCORE_THRESHOLD = 25  # centipawns
 
     def __init__(
         self,
@@ -25,6 +25,7 @@ class StockfishAnalysisApi:
         engine_path: str | Path | None = "/opt/homebrew/bin/stockfish",
         depth: int = 20,
         think_time: float | None = None,
+        best_score_threshold: int = 20,
     ):
         if multi_pv < 1:
             raise ValueError("multi_pv must be at least 1")
@@ -37,7 +38,21 @@ class StockfishAnalysisApi:
         self.engine_path = Path(engine_path) if engine_path else Path("stockfish")
         self.depth = depth
         self.think_time = think_time
-        self._response: EvalResponse | None = None
+        self.best_score_threshold = best_score_threshold
+
+        # Initialize database and check for cached response
+        self._db = DuckDb()
+        self._ctx = DbQueryContext(
+            fen=self.fen, multipv=self.multi_pv, depth=self.depth
+        )
+
+        cached = self._db.get(self._ctx)
+        if cached is not None:
+            # If the position is cached, load it
+            self._response: EvalResponse | None = EvalResponse(**cached)
+        else:
+            # Otherwise, no response yet
+            self._response = None
 
     def params(self):
         return {
@@ -51,6 +66,8 @@ class StockfishAnalysisApi:
 
     async def raw_evaluation(self) -> EvalResponse:
         result = await asyncio.to_thread(self._evaluate_position)
+        # Persist latest evaluation so repeated calls can skip engine work.
+        self._db.put(result, self._ctx)
         self._response = EvalResponse(**result)
         return self._response
 
@@ -147,4 +164,4 @@ class StockfishAnalysisApi:
 
     @property
     def best_moves(self):
-        return self.moves_within(self.BEST_SCORE_THRESHOLD)
+        return self.moves_within(self.best_score_threshold)

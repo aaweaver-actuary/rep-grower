@@ -8,6 +8,7 @@ dependencies=[
     "polars>=1.35.2",
     "pydantic>=2.12.4",
     "python-chess>=1.999",
+    "pyvis>=0.3.2",
 ]
 description="Add your description here"
 name="rep-grow"
@@ -16,7 +17,8 @@ requires-python=">=3.12"
 version="0.1.0"
 
     [project.scripts]
-    grow="rep_grow.grow:main"
+    grow ="rep_grow.grow:main"
+    prune="rep_grow.prune:main"
 
 [tool.maturin]
 module-name    ="rep_grow._core"

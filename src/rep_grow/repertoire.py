@@ -286,6 +286,11 @@ class Repertoire:
         if child is not self.root_node:
             child.add_parent(parent.fen)
         parent.add_child(move, child)
+        parent_pgn_nodes = parent.pgn_nodes or [pgn_node]
+        for parent_variation in parent_pgn_nodes:
+            variation_node = self._ensure_pgn_variation(parent_variation, move)
+            if variation_node not in child.pgn_nodes:
+                child.pgn_nodes.append(variation_node)
         child_pgn_node = self._ensure_pgn_variation(pgn_node, move)
         if child_pgn_node not in child.pgn_nodes:
             child.pgn_nodes.append(child_pgn_node)

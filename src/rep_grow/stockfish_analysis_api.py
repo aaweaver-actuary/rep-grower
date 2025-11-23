@@ -26,6 +26,7 @@ class StockfishAnalysisApi:
         depth: int = 20,
         think_time: float | None = None,
         best_score_threshold: int = 20,
+        db_path: str | Path | None = None,
     ):
         if multi_pv < 1:
             raise ValueError("multi_pv must be at least 1")
@@ -39,9 +40,10 @@ class StockfishAnalysisApi:
         self.depth = depth
         self.think_time = think_time
         self.best_score_threshold = best_score_threshold
+        self._last_response_source: str = "uninitialized"
 
         # Initialize database and check for cached response
-        self._db = DuckDb()
+        self._db = DuckDb(db_path=db_path)
         self._ctx = DbQueryContext(
             fen=self.fen, multipv=self.multi_pv, depth=self.depth
         )
@@ -50,6 +52,7 @@ class StockfishAnalysisApi:
         if cached is not None:
             # If the position is cached, load it
             self._response: EvalResponse | None = EvalResponse(**cached)
+            self._last_response_source = "cache"
         else:
             # Otherwise, no response yet
             self._response = None
@@ -64,11 +67,16 @@ class StockfishAnalysisApi:
             "thinkTime": str(self.think_time) if self.think_time else None,
         }
 
-    async def raw_evaluation(self) -> EvalResponse:
+    async def raw_evaluation(self, *, use_cache: bool = True) -> EvalResponse:
+        if use_cache and self._response is not None:
+            self._last_response_source = "cache"
+            return self._response
+
         result = await asyncio.to_thread(self._evaluate_position)
         # Persist latest evaluation so repeated calls can skip engine work.
         self._db.put(result, self._ctx)
         self._response = EvalResponse(**result)
+        self._last_response_source = "engine"
         return self._response
 
     def _evaluate_position(self) -> dict:
@@ -165,3 +173,7 @@ class StockfishAnalysisApi:
     @property
     def best_moves(self):
         return self.moves_within(self.best_score_threshold)
+
+    @property
+    def last_response_source(self) -> str:
+        return self._last_response_source

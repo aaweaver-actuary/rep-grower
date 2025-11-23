@@ -35,6 +35,7 @@ def stub_repertoire(monkeypatch):
                 SimpleNamespace(fen=start.fen()),
                 SimpleNamespace(fen=after_move.fen()),
             ]
+            self.nodes_by_fen = {}
 
         @property
         def leaf_nodes(self):

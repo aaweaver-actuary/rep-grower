@@ -115,44 +115,34 @@ def click_main(
         )
         rep.play_initial_moves()
 
-    print("PGN:")
-    print(rep.pgn)
+    click.echo("PGN:")
+    click.echo(rep.pgn)
 
-    async def expand_by_turn(iteration: int):
-        player_nodes = 0
-        opponent_nodes = 0
-        for node in rep.leaf_nodes:
-            board = chess.Board(node.fen)
-            if board.turn == rep.side:
-                player_nodes += 1
-            else:
-                opponent_nodes += 1
-        print(
-            "Iteration {iter}: expanding {player} player-turn and {opp} opponent-turn leaf nodes...".format(
-                iter=iteration, player=player_nodes, opp=opponent_nodes
-            )
-        )
-        await rep.expand_leaves_by_turn()
+    initial_moves = _initial_moves_slug(rep.initial_san)
+    if iterations > 0:
+        with click.progressbar(length=iterations, label="Growing repertoire") as bar:
+            for iteration in range(1, iterations + 1):
+                player_nodes, opponent_nodes = _leaf_turn_counts(rep)
+                click.echo(
+                    f"Iteration {iteration}: expanding {player_nodes} player-turn and {opponent_nodes} opponent-turn leaf nodes..."
+                )
+                before_moves = _repertoire_move_count(rep)
+                asyncio.run(rep.expand_leaves_by_turn())
+                after_moves = _repertoire_move_count(rep)
+                added_moves = max(0, after_moves - before_moves)
+                click.echo(
+                    f"    Added {added_moves} SAN moves this pass (total {after_moves})."
+                )
 
-    for i in range(iterations):
-        asyncio.run(expand_by_turn(i + 1))
-        initial_moves = ""
-        for j, move in enumerate(rep.initial_san.split()):
-            move_number = (j // 2) + 1
-            if j == 0:
-                initial_moves += f"{move_number}_{move}"
-            elif j % 2 == 0:
-                initial_moves += f"_{move_number}_{move}"
-            else:
-                initial_moves += f"_{move}"
-        filename = f"{output_dir}/{initial_moves}__iteration_{i + 1}.pgn"
-        rep.export_pgn(filename)
-        print(f"Exported repertoire to {filename}")
+                filename = f"{output_dir}/{initial_moves}__iteration_{iteration}.pgn"
+                rep.export_pgn(filename)
+                click.echo(f"    Exported repertoire to {filename}")
+                bar.update(1)
 
-    print("\nFinal PGN with all engine variations:")
-    filename = f"{output_dir}/{initial_moves}.pgn"
-    rep.export_pgn(filename)
-    print(f"Exported repertoire to {filename}")
+    click.echo("\nFinal PGN with all engine variations:")
+    final_filename = f"{output_dir}/{initial_moves}.pgn"
+    rep.export_pgn(final_filename)
+    click.echo(f"Exported repertoire to {final_filename}")
 
 
 def main():
@@ -161,3 +151,32 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+def _initial_moves_slug(initial_san: str) -> str:
+    slug = ""
+    for index, move in enumerate(initial_san.split()):
+        move_number = (index // 2) + 1
+        if index == 0:
+            slug += f"{move_number}_{move}"
+        elif index % 2 == 0:
+            slug += f"_{move_number}_{move}"
+        else:
+            slug += f"_{move}"
+    return slug
+
+
+def _leaf_turn_counts(rep: Repertoire) -> tuple[int, int]:
+    player_nodes = 0
+    opponent_nodes = 0
+    for node in rep.leaf_nodes:
+        board = chess.Board(node.fen)
+        if board.turn == rep.side:
+            player_nodes += 1
+        else:
+            opponent_nodes += 1
+    return player_nodes, opponent_nodes
+
+
+def _repertoire_move_count(rep: Repertoire) -> int:
+    return sum(len(node.children) for node in rep.nodes_by_fen.values())

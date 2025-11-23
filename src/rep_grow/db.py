@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from datetime import datetime
 import json
@@ -9,6 +10,12 @@ from typing import Any
 import duckdb
 
 DEFAULT_FILEPATH = "~/.stockfish.db"
+ENV_VAR = "REP_GROW_STOCKFISH_DB"
+
+
+def _resolve_db_path(db_path: str | os.PathLike[str] | None = None) -> str:
+    candidate = db_path or os.environ.get(ENV_VAR, DEFAULT_FILEPATH)
+    return str(Path(candidate).expanduser())
 
 
 @dataclass
@@ -31,8 +38,8 @@ class DbQueryContext:
 class DuckDb:
     """Wrapper around DuckDB connection for storing Stockfish evaluations, so they can be reused and retrieved quickly by hashing FENs."""
 
-    def __init__(self, db_path: str = DEFAULT_FILEPATH):
-        self.db_path = str(Path(db_path).expanduser())
+    def __init__(self, db_path: str | os.PathLike[str] | None = None):
+        self.db_path = _resolve_db_path(db_path)
         self._conn = None
 
         self.initialize_db()

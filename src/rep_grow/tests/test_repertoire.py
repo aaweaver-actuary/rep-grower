@@ -38,6 +38,20 @@ def _normalized_pgn(text: str) -> str:
     return game.accept(exporter)
 
 
+def _collect_pgn_lines(game: chess_pgn.Game) -> list[list[str]]:
+    lines: list[list[str]] = []
+
+    def walk(node: chess_pgn.GameNode, path: list[str]):
+        if not node.variations:
+            lines.append(path.copy())
+            return
+        for variation in node.variations:
+            walk(variation, path + [variation.san()])
+
+    walk(game, [])
+    return lines
+
+
 @pytest.fixture
 def fake_stockfish(monkeypatch):
     class FakeStockfish:
@@ -366,6 +380,57 @@ def test_repertoire_graph_deduplicates_transpositions():
     node: RepertoireNode = rep.nodes_by_fen[target_fen]
     assert len(node.parents) >= 2
     assert node.fen == target_fen
+
+
+def test_transposed_lines_share_future_moves_in_pgn():
+    rep = Repertoire(side=chess.WHITE, initial_san="")
+    rep.play_initial_moves()
+
+    italian_order = ["e4", "e5", "Nf3", "Nc6", "Bc4", "Bc5"]
+    italian_transposed = ["e4", "e5", "Bc4", "Bc5", "Nf3", "Nc6"]
+    third_line = ["e4", "e5", "Nf3", "Nc6", "Bb5", "a6", "Ba4"]
+
+    node_main = rep.branch_from(rep.root_node, italian_order)
+    node_transposed = rep.branch_from(rep.root_node, italian_transposed)
+
+    assert node_main is node_transposed
+
+    rep.branch_from(node_main, ["c3", "Nf6", "d4"])
+    rep.branch_from(rep.root_node, third_line)
+
+    lines = _collect_pgn_lines(rep.game)
+
+    assert [
+        "e4",
+        "e5",
+        "Nf3",
+        "Nc6",
+        "Bc4",
+        "Bc5",
+        "c3",
+        "Nf6",
+        "d4",
+    ] in lines
+    assert [
+        "e4",
+        "e5",
+        "Bc4",
+        "Bc5",
+        "Nf3",
+        "Nc6",
+        "c3",
+        "Nf6",
+        "d4",
+    ] in lines
+    assert [
+        "e4",
+        "e5",
+        "Nf3",
+        "Nc6",
+        "Bb5",
+        "a6",
+        "Ba4",
+    ] in lines
 
 
 def test_canonical_fen_ignores_move_counters():

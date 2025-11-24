@@ -1,14 +1,19 @@
 [package]
-name = "rep_grow"
-version = "0.1.0"
-edition = "2024"
+edition="2024"
+name   ="rep_grow"
+version="0.1.0"
 
 [lib]
-name = "_core"
-# "cdylib" is necessary to produce a shared library for Python to import from.
-crate-type = ["cdylib"]
+name="_core"
+# Build both cdylib for Python and rlib for Rust tests/tooling.
+crate-type=["cdylib", "rlib"]
 
 [dependencies]
-# "extension-module" tells pyo3 we want to build an extension module (skips linking against libpython.so)
 # "abi3-py39" tells pyo3 (and maturin) to build using the stable ABI with minimum Python version 3.9
-pyo3 = { version = "0.27.1", features = ["extension-module", "abi3-py39"] }
+pyo3    ={ version="0.27.1", features=["abi3-py39"] }
+shakmaty="0.27"
+
+[features]
+# Keep extension-module optional so cargo test can run without linking to libpython.
+default         =["extension-module"]
+extension-module=["pyo3/extension-module"]

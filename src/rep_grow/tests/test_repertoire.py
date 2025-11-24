@@ -456,6 +456,23 @@ def test_branch_from_reuses_existing_position():
     assert len(rep.nodes_by_fen) == 4
 
 
+def test_player_move_rankings_map_is_json_friendly():
+    rep = Repertoire(side=chess.WHITE, initial_san="")
+    rep.play_initial_moves()
+    root = rep.root_node
+    rep.branch_from(root, ["Nf3", "d5", "g3"])
+    rep.branch_from(root, ["Nf3", "c5", "Nc3"])
+    rep.branch_from(root, ["d4", "d5", "Nf3"])
+
+    rankings = rep.player_move_rankings()
+
+    assert rep.root_node.fen in rankings
+    first_entry = rankings[rep.root_node.fen][0]
+    assert set(first_entry.keys()) == {"uci", "san", "frequency"}
+    assert first_entry["san"] in {"Nf3", "d4"}
+    assert isinstance(first_entry["frequency"], int)
+
+
 @pytest.mark.asyncio
 async def test_expand_leaves_by_turn_routes_moves_by_side(
     fake_stockfish, fake_explorer

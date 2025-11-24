@@ -21,12 +21,25 @@ from .repertoire_pruner import RepertoirePruner
     required=True,
     help="Destination PGN file for the pruned repertoire",
 )
-def click_main(pgn_file: str, side: str, output_path: str) -> None:
+@click.option(
+    "--preferred-move",
+    "preferred_moves",
+    multiple=True,
+    help=(
+        "SAN or UCI moves to prioritize when available; can be provided multiple times"
+    ),
+)
+def click_main(
+    pgn_file: str,
+    side: str,
+    output_path: str,
+    preferred_moves: tuple[str, ...],
+) -> None:
     """Prune a repertoire PGN down to the most frequent player moves."""
 
     side_color = chess.WHITE if side.lower() == "white" else chess.BLACK
     repertoire = Repertoire.from_pgn_file(side=side_color, pgn_path=pgn_file)
-    pruner = RepertoirePruner(repertoire)
+    pruner = RepertoirePruner(repertoire, preferred_moves=preferred_moves)
     pruned_game = pruner.pruned_game()
 
     output = str(pruned_game).strip() + "\n"

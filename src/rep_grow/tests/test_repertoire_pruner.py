@@ -65,3 +65,61 @@ def test_move_frequencies_count_multiple_edges_into_same_child():
     counts = pruner.player_move_frequencies()
 
     assert counts[MoveFingerprint("N", "g1", "f3")] == 2
+
+
+def test_player_move_selection_prefers_configured_san():
+    rep = Repertoire(side=chess.WHITE, initial_san="")
+    rep.play_initial_moves()
+    root = rep.root_node
+    rep.branch_from(root, ["e4", "e5", "Nf3"])
+    rep.branch_from(root, ["e4", "e5", "Bb5"])
+    rep.branch_from(root, ["e4", "c5", "Nc3"])
+    rep.branch_from(root, ["Nf3", "d5", "g3"])
+    rep.branch_from(root, ["e4", "e5", "Bc4"])
+
+    board = chess.Board()
+    board.push_san("e4")
+    board.push_san("e5")
+    e4e5_fen = canonical_fen(board.fen())
+
+    default_pruner = RepertoirePruner(rep)
+    default_selection = default_pruner.player_move_selection()
+    assert default_selection[e4e5_fen]["san"] == "Nf3"
+
+    preferred_pruner = RepertoirePruner(rep, preferred_moves={"Bc4"})
+    preferred_selection = preferred_pruner.player_move_selection()
+    assert preferred_selection[e4e5_fen]["san"] == "Bc4"
+
+
+def test_preferred_move_ignored_when_not_available():
+    rep = Repertoire(side=chess.WHITE, initial_san="")
+    rep.play_initial_moves()
+    root = rep.root_node
+    rep.branch_from(root, ["d4", "d5", "c4"])
+    rep.branch_from(root, ["e4", "e5", "Nf3"])
+
+    pruner = RepertoirePruner(rep, preferred_moves={"Bc4"})
+    selection = pruner.player_move_selection()
+
+    assert selection[root.fen]["san"] == "d4"
+
+
+def test_preferred_moves_compare_using_frequency():
+    rep = Repertoire(side=chess.WHITE, initial_san="")
+    rep.play_initial_moves()
+    root = rep.root_node
+    rep.branch_from(root, ["d4", "d5", "e4", "e6", "Bc4"])
+    rep.branch_from(root, ["d4", "d5", "e4", "e6", "Bf4"])
+    rep.branch_from(root, ["d4", "d5", "Nc3", "Nf6", "e4", "e6", "Bc4"])
+
+    board = chess.Board()
+    board.push_san("d4")
+    board.push_san("d5")
+    board.push_san("e4")
+    board.push_san("e6")
+    target_fen = canonical_fen(board.fen())
+
+    pruner = RepertoirePruner(rep, preferred_moves={"Bc4", "Bf4"})
+    selection = pruner.player_move_selection()
+
+    assert selection[target_fen]["san"] == "Bc4"

@@ -102,6 +102,35 @@ prune repertoire.pgn --side white --output repertoire_pruned.pgn
 
 Useful after large `grow` sessions to distill study lines or to feed the visualizer.
 
+### `split` CLI
+
+Break a large repertoire PGN into several games, each capped at a configurable
+number of moves and labeled by the shared prefix they contain:
+
+```bash
+split repertoire.pgn --side white --max-moves 1000 --output repertoire_split.pgn
+```
+
+Each resulting game uses an `Event` header such as `1.e4 e5 2.Nf3 Nc6` to show
+the common moves for that chunk and sets `[SetUp "1"]` + `[FEN ...]` so play
+begins directly from the split position. This is handy when viewers cap PGN
+size (e.g., 1000 moves) or when you want to organize chapters by early
+divergences.
+
+### `freq` CLI
+
+Inspect the global move-frequency ordering that the pruner uses when choosing
+lines:
+
+```bash
+freq repertoire.pgn --side white --indent 2 > frequencies.json
+```
+
+The JSON groups every player-to-move node by FEN and lists each legal move in
+descending order of how often that move occurs across the repertoire graph. Use
+this to understand why `prune` picked a specific line or to locate candidate
+moves whose frequency you’d like to boost.
+
 ### `scripts/visualize_pruner.py`
 
 ```bash

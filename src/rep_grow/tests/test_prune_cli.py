@@ -23,6 +23,7 @@ def build_white_fixture(path: Path) -> Path:
     rep.branch_from(root, ["d4", "d5", "e4", "Nc6", "Nc3"])
     rep.branch_from(root, ["e4", "c5", "Nc3", "Nc6", "Nf3"])
     rep.branch_from(root, ["e4", "e5", "Nf3", "Nc6", "Bb5", "a6", "Ba4"])
+    rep.branch_from(root, ["e4", "e5", "Bc4", "Nc6", "Nf3"])
     rep.export_pgn(str(path))
     return path
 
@@ -36,6 +37,17 @@ def build_black_fixture(path: Path) -> Path:
     rep.branch_from(root, ["d4", "e5", "e3", "Nc6"])
     rep.branch_from(root, ["e4", "e5", "Nc3", "Nc6", "d4"])
     rep.branch_from(root, ["e4", "e5", "Nf3", "Nc6", "Nc3", "d6", "d4"])
+    rep.export_pgn(str(path))
+    return path
+
+
+def build_no_preferred_fixture(path: Path) -> Path:
+    rep = Repertoire(side=chess.WHITE, initial_san="")
+    rep.play_initial_moves()
+    root = rep.root_node
+    rep.branch_from(root, ["e4", "e5", "Nf3", "Nc6", "Bb5"])
+    rep.branch_from(root, ["e4", "c5", "Nc3", "Nc6", "Nf3"])
+    rep.branch_from(root, ["d4", "d5", "c4", "c6", "Nc3"])
     rep.export_pgn(str(path))
     return path
 
@@ -100,3 +112,53 @@ def test_black_pruning_only_affects_black_moves(tmp_path: Path):
     node_e5 = node_e4.variations[0]
     white_second_moves = sorted(child.move.uci() for child in node_e5.variations)
     assert white_second_moves == ["b1c3", "g1f3"]
+
+
+def test_white_pruning_prefers_configured_move(tmp_path: Path):
+    input_path = build_white_fixture(tmp_path / "input_pref.pgn")
+    output_path = tmp_path / "pruned_pref.pgn"
+
+    runner = CliRunner()
+    result = runner.invoke(
+        prune_cli,
+        [
+            str(input_path),
+            "--output",
+            str(output_path),
+            "--side",
+            "white",
+            "--preferred-move",
+            "Bc4",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+    game = read_game(output_path)
+    node_e4 = game.variations[0]
+    node_e5 = next(child for child in node_e4.variations if child.move.uci() == "e7e5")
+    white_reply = [child.move.uci() for child in node_e5.variations]
+    assert white_reply == ["f1c4"]
+
+
+def test_preferred_move_not_introduced_when_missing(tmp_path: Path):
+    input_path = build_no_preferred_fixture(tmp_path / "input_missing_pref.pgn")
+    output_path = tmp_path / "missing_pref_pruned.pgn"
+
+    runner = CliRunner()
+    result = runner.invoke(
+        prune_cli,
+        [
+            str(input_path),
+            "--output",
+            str(output_path),
+            "--side",
+            "white",
+            "--preferred-move",
+            "Bf4",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    game = read_game(output_path)
+
+    root_moves = {child.move.uci() for child in game.variations}
+    assert "f1f4" not in root_moves

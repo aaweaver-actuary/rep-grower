@@ -1,83 +1,50 @@
 from __future__ import annotations
 
-from collections import defaultdict
-from dataclasses import dataclass
-from typing import Dict
+from typing import Dict, Iterable
 
 import chess
 import chess.pgn as chess_pgn
 
 from .repertoire import Repertoire, RepertoireNode
-
-
-@dataclass(frozen=True)
-class MoveFingerprint:
-    piece: str
-    from_square: str
-    to_square: str
-
-    @classmethod
-    def from_move(cls, board: chess.Board, move: chess.Move) -> MoveFingerprint:
-        piece = board.piece_at(move.from_square)
-        if piece is None:  # pragma: no cover - defensive guard
-            raise ValueError(
-                "Move lacks originating piece; repertoire may be inconsistent"
-            )
-        return cls(
-            piece=piece.symbol().upper(),
-            from_square=chess.square_name(move.from_square),
-            to_square=chess.square_name(move.to_square),
-        )
+from .repertoire_analysis import (
+    MoveFingerprint,
+    player_move_frequencies as _player_move_frequencies,
+    player_move_rankings as _player_move_rankings,
+)
 
 
 class RepertoirePruner:
-    def __init__(self, repertoire: Repertoire):
+    def __init__(
+        self,
+        repertoire: Repertoire,
+        *,
+        preferred_moves: Iterable[str] | None = None,
+    ):
         self.repertoire = repertoire
         self._pgn_node_map: dict[int, RepertoireNode] | None = None
+        self._preferred_labels = self._normalize_preferred_moves(preferred_moves)
 
     def player_move_frequencies(self) -> Dict[MoveFingerprint, int]:
-        counts: Dict[MoveFingerprint, int] = defaultdict(int)
-        for parent in self.repertoire.nodes_by_fen.values():
-            board = chess.Board(parent.fen)
-            if board.turn != self.repertoire.side:
-                continue
-            for move_uci in parent.children.keys():
-                move = chess.Move.from_uci(move_uci)
-                fingerprint = MoveFingerprint.from_move(board, move)
-                counts[fingerprint] += 1
-        return dict(counts)
-
-    def nodes_by_player(self) -> list[RepertoireNode]:
-        return [
-            node
-            for node in self.repertoire.nodes_by_fen.values()
-            if chess.Board(node.fen).turn == self.repertoire.side
-        ]
+        return _player_move_frequencies(self.repertoire)
 
     def player_move_rankings(
         self,
         frequencies: Dict[MoveFingerprint, int] | None = None,
     ) -> dict[str, list[dict]]:
         frequencies = frequencies or self.player_move_frequencies()
-        rankings: dict[str, list[dict]] = {}
-        for node in self.nodes_by_player():
-            board = chess.Board(node.fen)
-            ranked: list[dict] = []
-            for move_uci, child in node.children.items():
-                move = chess.Move.from_uci(move_uci)
-                fingerprint = MoveFingerprint.from_move(board, move)
-                freq = frequencies.get(fingerprint, 0)
-                ranked.append(
-                    {
-                        "move": move,
-                        "uci": move_uci,
-                        "san": board.san(move),
-                        "frequency": freq,
-                        "child": child,
-                    }
+        rankings = _player_move_rankings(self.repertoire, frequencies=frequencies)
+        for fen, ranked in rankings.items():
+            board = chess.Board(fen)
+            for entry in ranked:
+                preferred = self._is_preferred_move(board, entry["move"])
+                entry["preferred"] = preferred
+            ranked.sort(
+                key=lambda item: (
+                    -int(item["preferred"]),
+                    -item["frequency"],
+                    item["san"],
                 )
-            ranked.sort(key=lambda item: (-item["frequency"], item["san"]))
-            rankings[node.fen] = ranked
+            )
         return rankings
 
     def player_move_selection(self) -> dict[str, dict]:
@@ -136,3 +103,32 @@ class RepertoirePruner:
             new_child.comment = variation.comment
             new_child.nags = set(variation.nags)
             self._copy_variations(variation, new_child, selection, mapping)
+
+    def _normalize_preferred_moves(
+        self, preferred_moves: Iterable[str] | None
+    ) -> set[str]:
+        labels: set[str] = set()
+        if not preferred_moves:
+            return labels
+        for raw in preferred_moves:
+            if raw is None:
+                continue
+            normalized = self._normalize_label(raw)
+            if normalized:
+                labels.add(normalized)
+        return labels
+
+    @staticmethod
+    def _normalize_label(value: str) -> str:
+        trimmed = value.strip()
+        if not trimmed:
+            return ""
+        trimmed = trimmed.rstrip("+#!?")
+        return trimmed.casefold()
+
+    def _is_preferred_move(self, board: chess.Board, move: chess.Move) -> bool:
+        if not self._preferred_labels:
+            return False
+        san_key = self._normalize_label(board.san(move))
+        uci_key = self._normalize_label(move.uci())
+        return san_key in self._preferred_labels or uci_key in self._preferred_labels

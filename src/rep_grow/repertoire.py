@@ -14,6 +14,7 @@ import httpx
 
 from .stockfish_analysis_api import StockfishAnalysisApi
 from .lichess_explorer_api import LichessExplorerApi
+from .repertoire_analysis import player_move_rankings as _player_move_rankings
 
 
 logger = logging.getLogger(__name__)
@@ -239,6 +240,22 @@ class Repertoire:
     def leaf_nodes(self) -> list[RepertoireNode]:
         """Return all leaf nodes in the repertoire."""
         return [node for node in self.nodes_by_fen.values() if node.is_leaf]
+
+    def player_move_rankings(self) -> dict[str, list[dict[str, object]]]:
+        """Return the sorted move frequency map for every player decision."""
+
+        rankings = _player_move_rankings(self)
+        result: dict[str, list[dict[str, object]]] = {}
+        for fen, entries in rankings.items():
+            result[fen] = [
+                {
+                    "uci": entry["uci"],
+                    "san": entry["san"],
+                    "frequency": entry["frequency"],
+                }
+                for entry in entries
+            ]
+        return result
 
     async def get_engine_moves(self, node: RepertoireNode | None = None):
         target_node = node or self.current_node
@@ -573,3 +590,7 @@ class Repertoire:
         with open(filepath, "w", encoding="utf-8") as f:
             exporter = chess_pgn.FileExporter(f)
             self.game.accept(exporter)
+
+    def __hash__(self) -> int:
+        # Allow usage in weak key caches that rely on object identity.
+        return object.__hash__(self)

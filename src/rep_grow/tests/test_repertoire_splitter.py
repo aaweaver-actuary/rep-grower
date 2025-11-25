@@ -39,6 +39,24 @@ def test_splitter_event_headers_reflect_prefix():
     assert game.headers["Event"].startswith("1.e4") or game.headers["Event"].startswith(
         "1.d4"
     )
-    assert game.headers["SetUp"] == "1"
-    assert game.headers["FEN"] == target.node.fen
     assert game.headers["Round"] == "2"
+    assert "SetUp" not in game.headers
+    assert "FEN" not in game.headers
+    assert game.board().fen() == rep.root_node.fen
+
+
+def test_splitter_games_start_from_root_position():
+    rep = build_split_sample()
+    splitter = RepertoireSplitter(rep)
+
+    events = splitter.split_events(max_moves=2)
+    target = next(event for event in events if event.prefix_moves)
+
+    game = splitter.build_game(target, event_index=1)
+
+    assert game.board().fen() == rep.root_node.fen
+
+    prefix_moves = [move.uci() for move in target.prefix_moves]
+    game_mainline = [move.uci() for move in game.mainline_moves()]
+
+    assert game_mainline[: len(prefix_moves)] == prefix_moves

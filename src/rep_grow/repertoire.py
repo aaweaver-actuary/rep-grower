@@ -8,7 +8,7 @@ import chess
 import chess.pgn as chess_pgn
 
 from dataclasses import dataclass, field
-from typing import Iterable
+from typing import Callable, Iterable
 
 import httpx
 
@@ -439,6 +439,7 @@ class Repertoire:
         nodes: Iterable[RepertoireNode] | None = None,
         multi_pv: int | None = None,
         max_concurrency: int | None = None,
+        progress_callback: Callable[[RepertoireNode], None] | None = None,
     ) -> dict[str, list[str]]:
         """Expand all given (or leaf) nodes in parallel using a worker queue."""
 
@@ -467,6 +468,8 @@ class Repertoire:
                         graph_lock=graph_lock,
                     )
                     results[node.fen] = moves
+                    if progress_callback is not None:
+                        progress_callback(node)
                 finally:
                     queue.task_done()
 
@@ -525,6 +528,7 @@ class Repertoire:
         nodes: Iterable[RepertoireNode] | None = None,
         pct: float | None = None,
         max_concurrency: int | None = None,
+        progress_callback: Callable[[RepertoireNode], None] | None = None,
     ) -> dict[str, list[str]]:
         """Expand nodes by fetching explorer moves via a worker queue."""
         targets = list(nodes or self.leaf_nodes)
@@ -552,6 +556,8 @@ class Repertoire:
                         graph_lock=graph_lock,
                     )
                     results[node.fen] = moves
+                    if progress_callback is not None:
+                        progress_callback(node)
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
@@ -587,6 +593,7 @@ class Repertoire:
         pct: float | None = None,
         max_concurrency: int | None = None,
         max_player_moves: int | None = None,
+        progress_callback: Callable[[RepertoireNode], None] | None = None,
     ) -> dict[str, list[str]]:
         """Expand leaf nodes, routing player turns to the engine and others to explorer."""
 
@@ -615,6 +622,7 @@ class Repertoire:
                 nodes=player_nodes,
                 multi_pv=multi_pv,
                 max_concurrency=max_concurrency,
+                progress_callback=progress_callback,
             )
             results.update(engine_results)
 
@@ -623,6 +631,7 @@ class Repertoire:
                 nodes=opponent_nodes,
                 pct=pct,
                 max_concurrency=max_concurrency,
+                progress_callback=progress_callback,
             )
             results.update(explorer_results)
 

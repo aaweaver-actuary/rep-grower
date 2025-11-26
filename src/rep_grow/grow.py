@@ -152,26 +152,49 @@ def click_main(
 
     initial_moves = _initial_moves_slug(rep.initial_san)
     if iterations > 0:
-        with click.progressbar(length=iterations, label="Growing repertoire") as bar:
-            for iteration in range(1, iterations + 1):
-                player_nodes, opponent_nodes = _leaf_turn_counts(rep, max_player_moves)
-                click.echo(
-                    f"Iteration {iteration}: expanding {player_nodes} player-turn and {opponent_nodes} opponent-turn leaf nodes..."
+        for iteration in range(1, iterations + 1):
+            player_nodes, opponent_nodes = _leaf_turn_counts(rep, max_player_moves)
+            total_targets = player_nodes + opponent_nodes
+            click.echo(
+                f"Iteration {iteration}: expanding {player_nodes} player-turn and {opponent_nodes} opponent-turn leaf nodes..."
+            )
+            before_moves = _repertoire_move_count(rep)
+
+            if total_targets > 0:
+                label = (
+                    f"Iteration {iteration} progress"
+                    if iterations > 1
+                    else "Expanding repertoire"
                 )
-                before_moves = _repertoire_move_count(rep)
+
+                with click.progressbar(
+                    length=total_targets,
+                    label=f"{label} ({total_targets} nodes)",
+                ) as node_bar:
+
+                    def _progress_callback(_node):
+                        node_bar.update(1)
+
+                    asyncio.run(
+                        rep.expand_leaves_by_turn(
+                            max_player_moves=max_player_moves,
+                            progress_callback=_progress_callback,
+                        )
+                    )
+            else:
                 asyncio.run(
                     rep.expand_leaves_by_turn(max_player_moves=max_player_moves)
                 )
-                after_moves = _repertoire_move_count(rep)
-                added_moves = max(0, after_moves - before_moves)
-                click.echo(
-                    f"    Added {added_moves} SAN moves this pass (total {after_moves})."
-                )
 
-                filename = f"{output_dir}/{initial_moves}__iteration_{iteration}.pgn"
-                rep.export_pgn(filename)
-                click.echo(f"    Exported repertoire to {filename}")
-                bar.update(1)
+            after_moves = _repertoire_move_count(rep)
+            added_moves = max(0, after_moves - before_moves)
+            click.echo(
+                f"    Added {added_moves} SAN moves this pass (total {after_moves})."
+            )
+
+            filename = f"{output_dir}/{initial_moves}__iteration_{iteration}.pgn"
+            rep.export_pgn(filename)
+            click.echo(f"    Exported repertoire to {filename}")
 
     click.echo("\nFinal PGN with all engine variations:")
     final_filename = f"{output_dir}/{initial_moves}.pgn"

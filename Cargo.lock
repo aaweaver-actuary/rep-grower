@@ -169,6 +169,7 @@ dependencies = [
 name = "rep_grow"
 version = "0.1.0"
 dependencies = [
+ "once_cell",
  "pyo3",
  "shakmaty",
 ]

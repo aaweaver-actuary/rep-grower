@@ -1,12 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
-from typing import Iterable, Sequence
 
-import chess
-import chess.engine
-
+from . import _core
 from .lichess_analysis_api import EvalResponse
 from .db import DuckDb, DbQueryContext
 
@@ -27,11 +25,14 @@ class StockfishAnalysisApi:
         think_time: float | None = None,
         best_score_threshold: int = 20,
         db_path: str | Path | None = None,
+        pool_size: int | None = None,
     ):
         if multi_pv < 1:
             raise ValueError("multi_pv must be at least 1")
         if depth <= 0 and (think_time is None or think_time <= 0):
             raise ValueError("Specify a positive depth or think_time")
+        if pool_size is not None and pool_size < 1:
+            raise ValueError("pool_size must be at least 1 when provided")
 
         self.fen = fen
         self.multi_pv = multi_pv
@@ -40,6 +41,7 @@ class StockfishAnalysisApi:
         self.depth = depth
         self.think_time = think_time
         self.best_score_threshold = best_score_threshold
+        self.pool_size = pool_size
         self._last_response_source: str = "uninitialized"
 
         # Initialize database and check for cached response
@@ -65,6 +67,7 @@ class StockfishAnalysisApi:
             "enginePath": str(self.engine_path),
             "depth": str(self.depth),
             "thinkTime": str(self.think_time) if self.think_time else None,
+            "poolSize": str(self.pool_size) if self.pool_size else None,
         }
 
     async def raw_evaluation(self, *, use_cache: bool = True) -> EvalResponse:
@@ -80,58 +83,23 @@ class StockfishAnalysisApi:
         return self._response
 
     def _evaluate_position(self) -> dict:
-        board = chess.Board(self.fen)
-        limit = (
-            chess.engine.Limit(depth=self.depth)
-            if self.depth > 0
-            else chess.engine.Limit(time=self.think_time)
-        )
+        pool_size = self.pool_size or self._default_pool_size()
         try:
-            engine = chess.engine.SimpleEngine.popen_uci(str(self.engine_path))
-        except FileNotFoundError as exc:  # pragma: no cover - user environment
-            raise RuntimeError(
-                f"Stockfish binary not found at {self.engine_path!s}."
-            ) from exc
+            return _core.stockfish_evaluate(
+                self.fen,
+                str(self.engine_path),
+                self.depth,
+                self.multi_pv,
+                self.think_time,
+                pool_size,
+            )
+        except RuntimeError as exc:  # pragma: no cover - surfaces Python RuntimeError
+            raise RuntimeError(str(exc)) from exc
 
-        with engine:
-            info = engine.analyse(board, limit=limit, multipv=self.multi_pv)
-
-        if isinstance(info, dict):
-            info_list: Sequence[dict] = [info]
-        else:
-            info_list = info
-
-        pvs = [self._convert_entry(board, entry) for entry in info_list]
-        depth = max((entry.get("depth", 0) for entry in info_list), default=self.depth)
-        nodes = max((entry.get("nodes", 0) for entry in info_list), default=0)
-        knodes = int(nodes / 1000)
-
-        return {
-            "depth": depth,
-            "fen": self.fen,
-            "knodes": knodes,
-            "pvs": pvs,
-        }
-
-    def _convert_entry(self, board: chess.Board, entry: dict) -> dict:
-        pv_moves: Sequence[chess.Move] = entry.get("pv") or []
-        uci_moves = self._moves_to_uci(board, pv_moves)
-        score: chess.engine.PovScore | None = entry.get("score")
-        pov_score = score.pov(board.turn) if score else None
-        cp = pov_score.score() if pov_score else None
-        mate = pov_score.mate() if pov_score else None
-        numeric_score = cp if cp is not None else mate
-        return {
-            "cp": cp,
-            "mate": mate,
-            "score": numeric_score,
-            "moves": " ".join(uci_moves),
-        }
-
-    def _moves_to_uci(
-        self, board: chess.Board, moves: Iterable[chess.Move]
-    ) -> list[str]:  # board kept for signature parity
-        return [move.uci() for move in moves]
+    @staticmethod
+    def _default_pool_size() -> int:
+        cpu_count = os.cpu_count() or 1
+        return max(1, min(4, cpu_count))
 
     @property
     def response(self) -> EvalResponse:

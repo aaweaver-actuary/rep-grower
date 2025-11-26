@@ -530,6 +530,29 @@ async def test_expand_leaves_by_turn_handles_mixed_turn_state(
     player_pgn = rep._mainline_node(player_node)
     assert any(player_board.san(var.move) == "a4" for var in player_pgn.variations)
 
+
+@pytest.mark.asyncio
+async def test_expand_leaves_by_turn_respects_max_player_moves(fake_stockfish):
+    fake_stockfish.moves_to_return = ["a2a4"]
+
+    rep = Repertoire(side=chess.WHITE, initial_san="")
+    rep.play_initial_moves()
+
+    shallow_node = rep.branch_from(rep.root_node, ["e4", "c6"])
+    deep_node = rep.branch_from(rep.root_node, ["e4", "e5", "Nf3", "Nc6"])
+
+    await rep.expand_leaves_by_turn(max_player_moves=2)
+
+    shallow_board = chess.Board(shallow_node.fen)
+    shallow_pgn = rep._mainline_node(shallow_node)
+    shallow_moves = {shallow_board.san(var.move) for var in shallow_pgn.variations}
+    assert "a4" in shallow_moves
+
+    deep_board = chess.Board(deep_node.fen)
+    deep_pgn = rep._mainline_node(deep_node)
+    deep_moves = {deep_board.san(var.move) for var in deep_pgn.variations}
+    assert "a4" not in deep_moves
+
     @pytest.mark.asyncio
     async def test_repertoire_config_applies_context(monkeypatch):
         captured: dict[str, float | int] = {}

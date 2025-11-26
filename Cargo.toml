@@ -10,8 +10,9 @@ crate-type=["cdylib", "rlib"]
 
 [dependencies]
 # "abi3-py39" tells pyo3 (and maturin) to build using the stable ABI with minimum Python version 3.9
-pyo3    ={ version="0.27.1", features=["abi3-py39"] }
-shakmaty="0.27"
+once_cell="1.19"
+pyo3     ={ version="0.27.1", features=["abi3-py39"] }
+shakmaty ="0.27"
 
 [features]
 # Keep extension-module optional so cargo test can run without linking to libpython.

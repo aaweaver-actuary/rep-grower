@@ -12,6 +12,7 @@ from typing import Iterable
 
 import httpx
 
+from . import _core
 from .stockfish_analysis_api import StockfishAnalysisApi
 from .lichess_explorer_api import LichessExplorerApi
 from .repertoire_analysis import player_move_rankings as _player_move_rankings
@@ -40,16 +41,8 @@ def nodes_from_root(rep: Repertoire, node: RepertoireNode) -> int:
     return count
 
 
-def _normalized_board_fen(board: chess.Board) -> str:
-    clone = board.copy(stack=False)
-    clone.halfmove_clock = 0
-    clone.fullmove_number = 1
-    return clone.fen()
-
-
 def canonical_fen(fen: str) -> str:
-    board = chess.Board(fen)
-    return _normalized_board_fen(board)
+    return _core.canonicalize_fen(fen)
 
 
 def _env_int(name: str, default: int) -> int:
@@ -70,6 +63,37 @@ def _env_float(name: str, default: float) -> float:
         return float(value)
     except ValueError:
         return default
+
+
+def _read_pgn_games(path: Path) -> list[chess_pgn.Game]:
+    games: list[chess_pgn.Game] = []
+    with open(path, "r", encoding="utf-8") as handle:
+        while True:
+            game = chess_pgn.read_game(handle)
+            if game is None:
+                break
+            games.append(game)
+    return games
+
+
+def _merge_game_nodes(target: chess_pgn.GameNode, source: chess_pgn.GameNode) -> None:
+    if source.comment:
+        if not target.comment:
+            target.comment = source.comment
+        elif source.comment not in target.comment:
+            target.comment = f"{target.comment}\n{source.comment}"
+    target.nags.update(source.nags)
+
+    for variation in source.variations:
+        move = variation.move
+        if move is None:
+            continue
+        matching_child = next(
+            (child for child in target.variations if child.move == move), None
+        )
+        if matching_child is None:
+            matching_child = target.add_variation(move)
+        _merge_game_nodes(matching_child, variation)
 
 
 class ExplorerRateLimiter:
@@ -105,6 +129,7 @@ class RepertoireConfig:
     stockfish_think_time: float | None = None
     stockfish_engine_path: str | Path | None = "/opt/homebrew/bin/stockfish"
     stockfish_best_score_threshold: int = 20
+    stockfish_pool_size: int | None = None
     explorer_pct: float = 90.0
     explorer_max_moves: int | None = None
     explorer_min_game_share: float = 0.05
@@ -148,12 +173,13 @@ class Repertoire:
         if self.config is None:
             self.config = RepertoireConfig()
         self.game.setup(self.board)
-        root_fen = _normalized_board_fen(self.board)
+        root_fen = canonical_fen(self.board.fen())
         root = RepertoireNode(fen=root_fen, move=None, pgn_nodes=[self.game])
         self.nodes_by_fen: dict[str, RepertoireNode] = {root_fen: root}
         self.root_node = root
         self.current_node = root
         self._explorer_rate_limiter: ExplorerRateLimiter | None = None
+        self._root_player_turn = chess.Board(root_fen).turn == self.side
 
     @classmethod
     def from_str(
@@ -177,10 +203,12 @@ class Repertoire:
         config: RepertoireConfig | None = None,
     ) -> Repertoire:
         path = Path(pgn_path)
-        with open(path, "r", encoding="utf-8") as handle:
-            game = chess_pgn.read_game(handle)
-        if game is None:
+        games = _read_pgn_games(path)
+        if not games:
             raise ValueError(f"No PGN game found in {path}")
+        game = games[0]
+        for extra in games[1:]:
+            _merge_game_nodes(game, extra)
 
         root_board = game.board()
         board_for_san = root_board.copy(stack=False)
@@ -240,6 +268,11 @@ class Repertoire:
     def leaf_nodes(self) -> list[RepertoireNode]:
         """Return all leaf nodes in the repertoire."""
         return [node for node in self.nodes_by_fen.values() if node.is_leaf]
+
+    def player_move_count(self, node: RepertoireNode) -> int:
+        depth = nodes_from_root(self, node)
+        offset = 1 if self._root_player_turn else 0
+        return (depth + offset) // 2
 
     def player_move_rankings(self) -> dict[str, list[dict[str, object]]]:
         """Return the sorted move frequency map for every player decision."""
@@ -355,6 +388,7 @@ class Repertoire:
             depth=depth or self.config.stockfish_depth,
             think_time=self.config.stockfish_think_time,
             best_score_threshold=self.config.stockfish_best_score_threshold,
+            pool_size=self.config.stockfish_pool_size,
         )
 
     def _resolve_pct(self, pct: float | None) -> float:
@@ -552,18 +586,27 @@ class Repertoire:
         multi_pv: int | None = None,
         pct: float | None = None,
         max_concurrency: int | None = None,
+        max_player_moves: int | None = None,
     ) -> dict[str, list[str]]:
         """Expand leaf nodes, routing player turns to the engine and others to explorer."""
 
+        leaves = self.leaf_nodes
         player_nodes: list[RepertoireNode] = []
         opponent_nodes: list[RepertoireNode] = []
 
-        for node in self.leaf_nodes:
-            board = chess.Board(node.fen)
-            if board.turn == self.side:
-                player_nodes.append(node)
-            else:
-                opponent_nodes.append(node)
+        if leaves:
+            mask = _core.player_turn_mask(
+                self.side == chess.WHITE,
+                [node.fen for node in leaves],
+            )
+            player_counts = [self.player_move_count(node) for node in leaves]
+            for node, is_player, count in zip(leaves, mask, player_counts):
+                if max_player_moves is not None and count >= max_player_moves:
+                    continue
+                if is_player:
+                    player_nodes.append(node)
+                else:
+                    opponent_nodes.append(node)
 
         results: dict[str, list[str]] = {}
 

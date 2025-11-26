@@ -2,6 +2,7 @@ import asyncio
 import chess
 import click
 
+from . import _core
 from .repertoire import Repertoire, RepertoireConfig
 
 
@@ -31,6 +32,16 @@ from .repertoire import Repertoire, RepertoireConfig
     help="Number of expansion iterations to perform.",
 )
 @click.option(
+    "--max-player-moves",
+    type=int,
+    default=None,
+    help=(
+        "Stop expanding a line once the player side has this many moves."
+        " Useful for targeting a specific repertoire depth."
+    ),
+    show_default=False,
+)
+@click.option(
     "--output-dir",
     type=click.Path(file_okay=False, path_type=str),
     default=".",
@@ -47,6 +58,13 @@ from .repertoire import Repertoire, RepertoireConfig
     type=int,
     default=20,
     help="Depth for Stockfish analysis.",
+)
+@click.option(
+    "--engine-pool-size",
+    type=int,
+    default=None,
+    help="Number of persistent Stockfish worker processes to keep alive.",
+    show_default=False,
 )
 @click.option(
     "--engine-multi-pv",
@@ -80,14 +98,27 @@ def click_main(
     side: str,
     engine_path: str,
     engine_depth: int,
+    engine_pool_size: int | None,
     engine_multi_pv: int,
     best_score_threshold: int,
     explorer_pct: float,
     explorer_min_game_share: float,
+    max_player_moves: int | None,
 ):
     if bool(initial_san) == bool(pgn_file):
         raise click.UsageError(
             "You must provide either --initial-san or --pgn-file, but not both."
+        )
+
+    if max_player_moves is not None and max_player_moves < 1:
+        raise click.BadParameter(
+            "--max-player-moves must be a positive integer.",
+            param_hint="--max-player-moves",
+        )
+    if engine_pool_size is not None and engine_pool_size < 1:
+        raise click.BadParameter(
+            "--engine-pool-size must be a positive integer.",
+            param_hint="--engine-pool-size",
         )
 
     side_color = chess.WHITE if side.lower() == "white" else chess.BLACK
@@ -97,6 +128,7 @@ def click_main(
         stockfish_depth=engine_depth,
         stockfish_engine_path=engine_path,
         stockfish_best_score_threshold=best_score_threshold,
+        stockfish_pool_size=engine_pool_size,
         explorer_pct=explorer_pct,
         explorer_min_game_share=explorer_min_game_share,
     )
@@ -122,12 +154,14 @@ def click_main(
     if iterations > 0:
         with click.progressbar(length=iterations, label="Growing repertoire") as bar:
             for iteration in range(1, iterations + 1):
-                player_nodes, opponent_nodes = _leaf_turn_counts(rep)
+                player_nodes, opponent_nodes = _leaf_turn_counts(rep, max_player_moves)
                 click.echo(
                     f"Iteration {iteration}: expanding {player_nodes} player-turn and {opponent_nodes} opponent-turn leaf nodes..."
                 )
                 before_moves = _repertoire_move_count(rep)
-                asyncio.run(rep.expand_leaves_by_turn())
+                asyncio.run(
+                    rep.expand_leaves_by_turn(max_player_moves=max_player_moves)
+                )
                 after_moves = _repertoire_move_count(rep)
                 added_moves = max(0, after_moves - before_moves)
                 click.echo(
@@ -166,12 +200,23 @@ def _initial_moves_slug(initial_san: str) -> str:
     return slug
 
 
-def _leaf_turn_counts(rep: Repertoire) -> tuple[int, int]:
+def _leaf_turn_counts(
+    rep: Repertoire, max_player_moves: int | None = None
+) -> tuple[int, int]:
+    leaves = rep.leaf_nodes
+    if not leaves:
+        return 0, 0
+    mask = _core.player_turn_mask(
+        rep.side == chess.WHITE,
+        [node.fen for node in leaves],
+    )
+    move_counts = [rep.player_move_count(node) for node in leaves]
     player_nodes = 0
     opponent_nodes = 0
-    for node in rep.leaf_nodes:
-        board = chess.Board(node.fen)
-        if board.turn == rep.side:
+    for is_player, move_count in zip(mask, move_counts):
+        if max_player_moves is not None and move_count >= max_player_moves:
+            continue
+        if is_player:
             player_nodes += 1
         else:
             opponent_nodes += 1

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Sequence
+from types import SimpleNamespace
+from typing import Iterable, Sequence
 
 import chess
 import chess.pgn as chess_pgn
 
 from .repertoire import Repertoire, RepertoireNode
+from . import _core
 
 
 @dataclass(frozen=True)
@@ -23,23 +25,30 @@ class RepertoireSplitter:
 
     def __init__(self, repertoire: Repertoire):
         self.repertoire = repertoire
-        self._move_counts: Dict[str, int] | None = None
 
     def split_events(self, max_moves: int = 1000) -> list[SplitEvent]:
         """Return split events where each subtree stays within ``max_moves``."""
 
         max_moves = max(1, int(max_moves))
-        move_counts = self._compute_move_counts()
-        events: list[SplitEvent] = []
-        root = self.repertoire.root_node
-        self._split_node(
-            node=root,
-            prefix_moves=[],
-            prefix_fens={root.fen},
-            events=events,
-            move_counts=move_counts,
-            max_moves=max_moves,
+        payload = self._split_payload()
+        raw_events = _core.split_repertoire_nodes(
+            self.repertoire.root_node.fen,
+            payload,
+            max_moves,
         )
+        events: list[SplitEvent] = []
+        for fen, prefix_uci, move_count in raw_events:
+            node = self.repertoire.nodes_by_fen.get(fen)
+            if node is None:
+                continue
+            moves = tuple(chess.Move.from_uci(uci) for uci in prefix_uci)
+            events.append(
+                SplitEvent(
+                    node=node,
+                    prefix_moves=moves,
+                    move_count=int(move_count),
+                )
+            )
         return events
 
     def build_game(
@@ -110,68 +119,15 @@ class RepertoireSplitter:
                 game.accept(exporter)
                 handle.write("\n\n")
 
-    def _compute_move_counts(self) -> Dict[str, int]:
-        if self._move_counts is not None:
-            return self._move_counts
-
-        memo: Dict[str, int] = {}
-        visiting: set[str] = set()
-
-        def dfs(node: RepertoireNode) -> int:
-            if node.fen in memo:
-                return memo[node.fen]
-            if node.fen in visiting:
-                return 0
-            visiting.add(node.fen)
-            total = len(node.children)
-            for child in node.children.values():
-                total += dfs(child)
-            visiting.remove(node.fen)
-            memo[node.fen] = total
-            return total
-
-        dfs(self.repertoire.root_node)
-        self._move_counts = memo
-        return memo
-
-    def _split_node(
-        self,
-        *,
-        node: RepertoireNode,
-        prefix_moves: List[chess.Move],
-        prefix_fens: set[str],
-        events: list[SplitEvent],
-        move_counts: Dict[str, int],
-        max_moves: int,
-    ) -> None:
-        count = move_counts.get(node.fen, 0)
-        if count <= max_moves or not node.children:
-            events.append(
-                SplitEvent(
-                    node=node,
-                    prefix_moves=tuple(prefix_moves),
-                    move_count=count,
-                )
-            )
-            return
-
-        ordered_children = self._sorted_children(node)
-        for move_uci, child in ordered_children:
-            if child.fen in prefix_fens:
-                continue
-            move = chess.Move.from_uci(move_uci)
-            prefix_moves.append(move)
-            prefix_fens.add(child.fen)
-            self._split_node(
-                node=child,
-                prefix_moves=prefix_moves,
-                prefix_fens=prefix_fens,
-                events=events,
-                move_counts=move_counts,
-                max_moves=max_moves,
-            )
-            prefix_fens.remove(child.fen)
-            prefix_moves.pop()
+    def _split_payload(self) -> list[SimpleNamespace]:
+        payload: list[SimpleNamespace] = []
+        for node in self.repertoire.nodes_by_fen.values():
+            children = [
+                SimpleNamespace(uci=move_uci, fen=child.fen)
+                for move_uci, child in node.children.items()
+            ]
+            payload.append(SimpleNamespace(fen=node.fen, children=children))
+        return payload
 
     def _copy_subtree(
         self,

@@ -13,9 +13,7 @@ jobs:
     env:
       UV_PYTHON: "3.12"
       CARGO_TERM_COLOR: always
-      UV_CACHE_DIR: "${RUNNER_TEMP}/uv-cache"
-      CARGO_HOME: "${RUNNER_TEMP}/cargo"
-      CARGO_TARGET_DIR: "${RUNNER_TEMP}/cargo-target"
+      UV_CACHE_DIR: "${{ runner.temp }}/uv-cache"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -40,6 +38,11 @@ jobs:
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Set cargo dirs
+        run: |
+          echo "CARGO_HOME=${{ runner.temp }}/cargo" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_DIR=${{ runner.temp }}/cargo-target" >> "$GITHUB_ENV"
 
       - name: Rust version
         id: rustc-version

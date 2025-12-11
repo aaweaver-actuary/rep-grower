@@ -14,6 +14,7 @@ use std::str::FromStr;
 
 mod stockfish;
 use stockfish::stockfish_evaluate;
+pub mod study;
 
 /// A Python module implemented in Rust.
 #[pymodule]
@@ -28,18 +29,16 @@ fn _core(_py: Python<'_>, m: Bound<'_, PyModule>) -> PyResult<()> {
 
 #[pyfunction]
 fn canonicalize_fen(fen_text: String) -> PyResult<String> {
-    let fen = Fen::from_str(&fen_text).map_err(|err| {
-        PyValueError::new_err(format!(
-            "Invalid FEN '{}' while canonicalizing: {err}",
-            fen_text
-        ))
-    })?;
-    let position: Chess = fen.into_position(CastlingMode::Standard).map_err(|err| {
-        PyValueError::new_err(format!(
-            "Unable to construct position from '{}' while canonicalizing: {err}",
-            fen_text
-        ))
-    })?;
+    canonicalize_fen_str(&fen_text)
+        .map_err(|err| PyValueError::new_err(format!("{err} (fen='{fen_text}')")))
+}
+
+pub fn canonicalize_fen_str(fen_text: &str) -> Result<String, String> {
+    let fen = Fen::from_str(fen_text)
+        .map_err(|err| format!("Invalid FEN while canonicalizing: {err}"))?;
+    let position: Chess = fen
+        .into_position(CastlingMode::Standard)
+        .map_err(|err| format!("Unable to construct position while canonicalizing: {err}"))?;
     let normalized = Fen::from_position(position, EnPassantMode::Legal).to_string();
     Ok(reset_move_counters(&normalized))
 }

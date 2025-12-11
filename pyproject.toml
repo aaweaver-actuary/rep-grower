@@ -17,10 +17,12 @@ requires-python=">=3.12"
 version="0.1.0"
 
     [project.scripts]
-    freq ="rep_grow.frequencies:main"
-    grow ="rep_grow.grow:main"
-    prune="rep_grow.prune:main"
-    split="rep_grow.split:main"
+    annotate-reach-counts="rep_grow.annotate_reach_counts:main"
+    export-anki          ="rep_grow.export_repertoire_to_anki_csv:main"
+    freq                 ="rep_grow.frequencies:main"
+    grow                 ="rep_grow.grow:main"
+    prune                ="rep_grow.prune:main"
+    split                ="rep_grow.split:main"
 
 [tool.maturin]
 features       =["extension-module"]

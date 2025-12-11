@@ -5,12 +5,8 @@ import chess
 import chess.pgn as chess_pgn
 import pytest
 
-from rep_grow.repertoire import (
-    Repertoire,
-    RepertoireConfig,
-    RepertoireNode,
-    canonical_fen,
-)
+from rep_grow.fen import canonical_fen
+from rep_grow.repertoire import Repertoire, RepertoireConfig, RepertoireNode
 
 PGN_WITH_VARIATIONS = """[Event "?"]
 [Site "?"]

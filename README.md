@@ -3,12 +3,16 @@
 Tooling for automatically growing, pruning, and visualizing chess repertoires that are
 engine-verified for the player side and grounded in human game data for the opponent.
 
-The repository centers on a Python package plus two Click CLIs:
+The repository centers on a Python package plus several Click CLIs:
 
 - `grow` – iteratively expand a PGN repertoire by alternating between Stockfish
 	analysis for the player and Lichess Explorer statistics for the opponent.
 - `prune` – collapse an existing repertoire down to the single most frequent move
 	for each player decision to yield a practical training line.
+- `split` – divide a large repertoire into smaller PGNs capped by move count and
+	labeled by their shared prefix.
+- `freq` – print the move-frequency ordering the pruner uses at each player node.
+- `export-anki` – emit an Anki-ready CSV of repertoire lines for bulk import.
 
 Supporting scripts export PyVis graphs from pruning reports and bundle optional JS
 assets that can front a richer UI later.
@@ -117,6 +121,30 @@ begins directly from the split position. This is handy when viewers cap PGN
 size (e.g., 1000 moves) or when you want to organize chapters by early
 divergences.
 
+### `export-anki` CLI
+
+Generate an Anki-compatible CSV (columns: `PuzzleID, Description, FEN, Moves`) from
+a repertoire PGN:
+
+```bash
+export-anki \
+	--pgn-file repertoire.pgn \
+	--side white \
+	--output anki_repertoire.csv \
+	--max-plies 12 \
+	--description-plies 8 \
+	--dedupe
+```
+
+- Root FEN is canonicalized so every row starts from the same position.
+- Traversal is depth-first with children sorted by SAN for determinism; `--max-plies`
+	truncates move lists while `--min-plies` drops shorter lines.
+- `--dedupe` collapses identical SAN strings after capping; `--chunk-size` writes
+	numbered `_partN` CSV files for large exports.
+- Descriptions default to the first N SAN tokens, falling back to PGN `Variation`/`ECO`
+	tags when present.
+- Output uses `csv.QUOTE_ALL` to match Anki's bulk importer expectations.
+
 ### `freq` CLI
 
 Inspect the global move-frequency ordering that the pruner uses when choosing
@@ -150,6 +178,8 @@ selected move or an alternative, with edge widths proportional to frequency coun
 - `src/rep_grow/repertoire_pruner.py` – Move frequency analysis + pruning export.
 - `src/rep_grow/grow.py` – Click CLI orchestrating expansion/export loop.
 - `src/rep_grow/prune.py` – Click CLI for pruning existing PGNs.
+- `src/rep_grow/export_repertoire_to_anki_csv.py` – Click CLI for CSV exports to
+	Anki.
 - `scripts/visualize_pruner.py` – PyVis renderer for pruning reports.
 - `lib/` – Front-end dependencies (tom-select, vis.js) for future UI work.
 - `tests/` – Rich pytest suite exercising the CLI flows, graph logic, pruner, and

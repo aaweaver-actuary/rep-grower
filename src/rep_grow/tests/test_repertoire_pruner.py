@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import chess
 
-from rep_grow.repertoire import Repertoire, RepertoireNode, canonical_fen
+from rep_grow.fen import canonical_fen
+from rep_grow.repertoire import Repertoire, RepertoireNode
 from rep_grow.repertoire_pruner import MoveFingerprint, RepertoirePruner
 
 

@@ -4,18 +4,20 @@ import asyncio
 import logging
 import os
 from pathlib import Path
+
 import chess
 import chess.pgn as chess_pgn
+import httpx
 
 from dataclasses import dataclass, field
 from typing import Callable, Iterable
 
-import httpx
-
 from . import _core
+from .fen import canonical_fen
 from .stockfish_analysis_api import StockfishAnalysisApi
 from .lichess_explorer_api import LichessExplorerApi
 from .repertoire_analysis import player_move_rankings as _player_move_rankings
+from .pgn_metadata import extract_reach_count, upsert_reach_count_tag
 
 
 logger = logging.getLogger(__name__)
@@ -39,10 +41,6 @@ def nodes_from_root(rep: Repertoire, node: RepertoireNode) -> int:
         current = parent
         count += 1
     return count
-
-
-def canonical_fen(fen: str) -> str:
-    return _core.canonicalize_fen(fen)
 
 
 def _env_int(name: str, default: int) -> int:
@@ -142,6 +140,7 @@ class RepertoireNode:
     parents: set[str] = field(default_factory=set)
     children: dict[str, RepertoireNode] = field(default_factory=dict)
     pgn_nodes: list[chess_pgn.GameNode] = field(default_factory=list)
+    games_reached: int | None = None
 
     def add_parent(self, parent_fen: str):
         self.parents.add(parent_fen)
@@ -175,6 +174,9 @@ class Repertoire:
         self.game.setup(self.board)
         root_fen = canonical_fen(self.board.fen())
         root = RepertoireNode(fen=root_fen, move=None, pgn_nodes=[self.game])
+        root_count, _ = extract_reach_count(self.game.comment)
+        if root_count is not None:
+            root.games_reached = root_count
         self.nodes_by_fen: dict[str, RepertoireNode] = {root_fen: root}
         self.root_node = root
         self.current_node = root
@@ -358,6 +360,9 @@ class Repertoire:
                 continue
             board.push(move)
             child, _ = self._link_child(rep_node, move, board.fen(), pgn_node)
+            count, _ = extract_reach_count(variation.comment)
+            if count is not None:
+                child.games_reached = count
             self._ingest_pgn_tree(variation, child, board)
             board.pop()
 
@@ -490,14 +495,25 @@ class Repertoire:
         limiter = self._get_explorer_limiter()
         async with limiter:
             await api.raw_explorer()
+        pgn_node = self._pgn_node_for(target_node)
+
+        total_games = None
+        response = getattr(api, "response", None)
+        if response is not None and hasattr(response, "totalGames"):
+            total_games = response.totalGames
+        if total_games is not None:
+            target_node.games_reached = total_games
+            for node_comment in target_node.pgn_nodes:
+                node_comment.comment = upsert_reach_count_tag(
+                    node_comment.comment, total_games
+                )
+            pgn_node.comment = upsert_reach_count_tag(pgn_node.comment, total_games)
         target_pct = self._resolve_pct(pct)
         moves = api.top_p_pct_moves(
             pct=target_pct,
             max_moves=self.config.explorer_max_moves,
             min_game_share=self.config.explorer_min_game_share,
         )
-
-        pgn_node = self._pgn_node_for(target_node)
         existing_moves = {var.move for var in pgn_node.variations}
         added_moves: list[str] = []
 

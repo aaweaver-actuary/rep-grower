@@ -9,6 +9,7 @@ wheels/
 # Virtual environments
 .venv
 *.pgn
+!src/rep_grow/tests/fixtures/*.pgn
 target/debug/
 target/flycheck0/
 target/*

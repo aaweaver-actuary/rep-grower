@@ -1,0 +1,26 @@
+[Event "Anki Export Fixture A"]
+[Site "?"]
+[Date "2025.01.01"]
+[Round "?"]
+[White "Tester"]
+[Black "Tester"]
+[Result "*"]
+1. e4 e5 2. Nf3 Nc6 3. Bb5 a6 4. Ba4 Nf6 5. O-O Be7 *
+
+[Event "Anki Export Fixture B"]
+[Site "?"]
+[Date "2025.01.01"]
+[Round "?"]
+[White "Tester"]
+[Black "Tester"]
+[Result "*"]
+1. e4 e5 2. Nf3 Nc6 3. Bb5 a6 4. Ba4 b5 5. Bb3 Nf6 6. d3 Be7 7. O-O *
+
+[Event "Anki Export Fixture C"]
+[Site "?"]
+[Date "2025.01.01"]
+[Round "?"]
+[White "Tester"]
+[Black "Tester"]
+[Result "*"]
+1. e4 e5 2. Nf3 d6 3. d4 exd4 4. Nxd4 Nf6 *

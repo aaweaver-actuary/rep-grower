@@ -1,0 +1,112 @@
+name: Release (patch auto)
+
+on:
+  workflow_run:
+    workflows: [CI]
+    branches: [main]
+    types: [completed]
+
+permissions:
+  contents: write
+
+jobs:
+  patch-release:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    env:
+      UV_PYTHON: "3.12"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "0.4.28"
+
+      - name: Fetch tags
+        run: git fetch --tags
+
+      - name: Determine next version
+        id: version
+        shell: python
+        run: |
+          import re, subprocess, tomllib, pathlib
+
+          def ver_tuple(s: str):
+            return tuple(int(p) for p in s.split("."))
+
+          latest = None
+          try:
+            latest = subprocess.check_output([
+                "bash", "-c", "git tag --list 'v*' --sort=-v:refname | head -n1"
+            ], text=True).strip()
+          except Exception:
+            latest = None
+
+          pyproject = pathlib.Path("pyproject.toml").read_text(encoding="utf-8")
+          current = tomllib.loads(pyproject)["project"]["version"]
+
+          if latest:
+            lt = ver_tuple(latest.lstrip("v"))
+            ct = ver_tuple(current)
+            if ct > lt:
+              new_ver = current
+            else:
+              new_ver = f"{lt[0]}.{lt[1]}.{lt[2] + 1}"
+          else:
+            new_ver = current
+
+          print(f"new_version={new_ver}")
+          with open("$GITHUB_OUTPUT", "w", encoding="utf-8") as fh:
+            fh.write(f"new_version={new_ver}\n")
+
+      - name: Bump versions in manifests
+        shell: python
+        env:
+          NEW_VERSION: ${{ steps.version.outputs.new_version }}
+        run: |
+          import pathlib, re, sys
+
+          new = "$NEW_VERSION"
+          if not new:
+            sys.exit("Missing NEW_VERSION")
+
+          def replace(path: str, pattern: str, repl: str):
+            p = pathlib.Path(path)
+            text = p.read_text(encoding="utf-8")
+            new_text, n = re.subn(pattern, repl, text, flags=re.MULTILINE)
+            if n == 0:
+              sys.exit(f"Failed to update {path}")
+            p.write_text(new_text, encoding="utf-8")
+
+          replace("pyproject.toml", r'^version\s*=\s*"[^"]+"', f'version="{new}"')
+          replace("Cargo.toml", r'^version\s*=\s*"[^"]+"', f'version="{new}"')
+
+      - name: Build wheel
+        run: uv build --wheel
+
+      - name: Commit version bump and tag
+        env:
+          NEW_VERSION: ${{ steps.version.outputs.new_version }}
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add pyproject.toml Cargo.toml
+          git commit -m "Release v${NEW_VERSION}" || echo "No changes to commit"
+          git tag "v${NEW_VERSION}" || echo "Tag exists"
+          git push origin HEAD:main --follow-tags
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.new_version }}
+          files: dist/*.whl
+          generate_release_notes: true

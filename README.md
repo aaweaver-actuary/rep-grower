@@ -1,5 +1,7 @@
 # rep-grow
 
+[![CI](https://github.com/aaweaver-actuary/rep-grower/actions/workflows/ci.yml/badge.svg)](https://github.com/aaweaver-actuary/rep-grower/actions/workflows/ci.yml)
+
 Tooling for automatically growing, pruning, and visualizing chess repertoires that are
 engine-verified for the player side and grounded in human game data for the opponent.
 

@@ -2,6 +2,7 @@ import pytest
 
 import rep_grow.stockfish_analysis_api as stockfish_module
 from rep_grow.stockfish_analysis_api import StockfishAnalysisApi
+from rep_grow.requests import StockfishRequest
 
 
 def stockfish_payload(
@@ -84,7 +85,14 @@ async def test_raw_evaluation_converts_engine_response(monkeypatch):
     )
     calls = install_fake_eval(monkeypatch, response)
 
-    api = StockfishAnalysisApi(fen, multi_pv=2)
+    api = StockfishAnalysisApi(
+        request=StockfishRequest(
+            fen=fen,
+            multi_pv=2,
+            depth=22,
+            variant="standard",
+        ),
+    )
     await api.raw_evaluation()
 
     assert calls[0]["fen"] == fen
@@ -183,3 +191,45 @@ async def test_depth_zero_uses_time_limit(monkeypatch):
     await api.raw_evaluation()
 
     assert calls[0]["think_time"] == pytest.approx(0.1)
+
+
+@pytest.mark.asyncio
+async def test_raw_evaluation_uses_cache_when_present(monkeypatch):
+    response = stockfish_payload(
+        fen="start",
+        pvs=[{"cp": 5, "score": 5, "moves": "e2e4 e7e5"}],
+    )
+    calls = install_fake_eval(monkeypatch, response)
+
+    api = StockfishAnalysisApi("start")
+    first = await api.raw_evaluation(use_cache=True)
+    second = await api.raw_evaluation(use_cache=True)
+
+    assert calls == [
+        {
+            "fen": "start",
+            "engine_path": str(api.engine_path),
+            "depth": api.depth,
+            "multi_pv": api.multi_pv,
+            "think_time": api.think_time,
+            "pool_size": api.pool_size or api._default_pool_size(),
+        }
+    ]
+    assert first is second
+    assert api.last_response_source == "cache"
+
+
+def test_default_pool_size_clamps_cpu_count(monkeypatch):
+    monkeypatch.setattr(stockfish_module.os, "cpu_count", lambda: 0)
+    assert StockfishAnalysisApi._default_pool_size() == 1
+
+    monkeypatch.setattr(stockfish_module.os, "cpu_count", lambda: 2)
+    assert StockfishAnalysisApi._default_pool_size() == 2
+
+    monkeypatch.setattr(stockfish_module.os, "cpu_count", lambda: 8)
+    assert StockfishAnalysisApi._default_pool_size() == 4
+
+
+def test_init_rejects_small_pool_size():
+    with pytest.raises(ValueError):
+        StockfishAnalysisApi("start", pool_size=0)

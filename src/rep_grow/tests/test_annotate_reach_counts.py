@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import chess
 from click.testing import CliRunner
+from pathlib import Path
 
 from rep_grow.annotate_reach_counts import click_main
 from rep_grow.pgn_metadata import extract_reach_count
@@ -149,3 +150,54 @@ def test_cli_respects_existing_tags(monkeypatch, tmp_path):
     updated_force = pgn_path.read_text(encoding="utf-8")
     assert "[rg:games=5]" in updated_force
     assert "[rg:games=42]" in updated_force  # opponent node remains
+
+
+def test_checkpoint_writes_intermediate_file(monkeypatch, tmp_path):
+    from rep_grow import annotate_reach_counts as arc
+
+    FakeExplorer.totals = {chess.STARTING_FEN: 7}
+    monkeypatch.setattr(arc, "LichessExplorerApi", FakeExplorer)
+    monkeypatch.setattr(FakeExplorer, "totalGames", property(lambda self: 7))
+
+    pgn_path = tmp_path / "in.pgn"
+    pgn_path.write_text(_sample_pgn(), encoding="utf-8")
+
+    runner = CliRunner()
+    output_path = tmp_path / "out.pgn"
+    result = runner.invoke(
+        click_main,
+        [
+            "--pgn-file",
+            str(pgn_path),
+            "--side",
+            "white",
+            "--output",
+            str(output_path),
+            "--checkpoint-every",
+            "1",
+            "--progress-every",
+            "1",
+            "--progress-bar",
+            "--max-concurrency",
+            "1",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    annotated = output_path.read_text(encoding="utf-8")
+    counts = []
+    for line in annotated.splitlines():
+        if "[rg:games=" in line:
+            count, _ = extract_reach_count(line)
+            counts.append(count)
+    assert 7 in counts
+
+    checkpoints = sorted(Path(tmp_path).glob("out_checkpoint_*.pgn"))
+    assert checkpoints, "expected at least one checkpoint file"
+    checkpoint_text = checkpoints[0].read_text(encoding="utf-8")
+    checkpoint_counts = []
+    for line in checkpoint_text.splitlines():
+        if "[rg:games=" in line:
+            c, _ = extract_reach_count(line)
+            checkpoint_counts.append(c)
+    assert 7 in checkpoint_counts

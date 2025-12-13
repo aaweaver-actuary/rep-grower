@@ -1,4 +1,12 @@
-from rep_grow.db import DuckDb, DbQueryContext
+from rep_grow.db import (
+    DuckDb,
+    DbQueryContext,
+    DuckDbExplorerStore,
+    DuckDbStockfishStore,
+    ExplorerQueryContext,
+    _resolve_db_path,
+)
+from rep_grow.config import Config
 
 FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
 
@@ -96,3 +104,62 @@ def test_duckdb_persists_across_instances(tmp_path):
     db_second = DuckDb(str(cache_path))
     cached = db_second.get(ctx)
     assert cached == payload
+
+
+def test_resolve_db_path_respects_env(monkeypatch, tmp_path):
+    env_path = tmp_path / "env.duckdb"
+    monkeypatch.setenv("REP_GROW_STOCKFISH_DB", str(env_path))
+    resolved = _resolve_db_path(None, Config())
+    assert resolved == str(env_path)
+
+
+def test_resolve_db_path_prefers_explicit(monkeypatch, tmp_path):
+    env_path = tmp_path / "env.duckdb"
+    explicit_path = tmp_path / "explicit.duckdb"
+    monkeypatch.setenv("REP_GROW_STOCKFISH_DB", str(env_path))
+    resolved = _resolve_db_path(str(explicit_path), Config())
+    assert resolved == str(explicit_path)
+
+
+def test_duckdb_stockfish_store_round_trip(tmp_path):
+    db = DuckDb(str(tmp_path / "cache.duckdb"))
+    store = DuckDbStockfishStore(db)
+    ctx = DbQueryContext(fen=FEN, multipv=2, depth=18)
+    payload = sample_evaluation(score=15)
+
+    store.put(payload, ctx)
+    result = store.get(ctx)
+
+    assert result == payload
+
+
+def test_duckdb_explorer_store_round_trip(tmp_path):
+    db = DuckDb(str(tmp_path / "cache.duckdb"))
+    store = DuckDbExplorerStore(db)
+    ctx = ExplorerQueryContext(
+        fen=FEN,
+        variant="standard",
+        play="",
+        speeds="ultraBullet,bullet,blitz,rapid",
+        ratings="0,1000",
+        since="1952-01",
+        until="3000-12",
+        moves="15",
+        top_games=0,
+        recent_games=0,
+        history="false",
+    )
+    payload = {
+        "opening": None,
+        "white": 1,
+        "draws": 0,
+        "black": 1,
+        "moves": [],
+        "recentGames": [],
+        "topGames": [],
+    }
+
+    store.put(payload, ctx)
+    result = store.get(ctx)
+
+    assert result == payload

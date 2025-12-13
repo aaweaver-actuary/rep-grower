@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import random
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -9,13 +10,17 @@ from pydantic import BaseModel, Field
 from typing import Optional, TypedDict
 from typing_extensions import Annotated
 
+from .db import DuckDb, DuckDbExplorerStore, ExplorerQueryContext
+from .fetcher import CachedFetcher
+from .requests import ExplorerRequest, DEFAULT_EXPLORER_RATINGS
+
 
 class ExplorerMoveTotal(TypedDict):
     move: str
     total: int
 
 
-class LichessExplorerApi:
+class LichessExplorerApi(CachedFetcher[ExplorerQueryContext, "ExplorerResponse"]):
     BASE_URL = "https://explorer.lichess.ovh/lichess"
 
     def __init__(
@@ -24,62 +29,84 @@ class LichessExplorerApi:
         variant: str = "standard",
         play: str = "",
         speeds: str = "ultraBullet,bullet,blitz,rapid",
-        ratings: list[int] = [0, 1000, 1200, 1400, 1600, 1800, 2000, 2200, 2500],
+        ratings: list[int] | str | None = None,
         since: str = "1952-01",
         until: str = "3000-12",
         moves: str = "15",
         topGames: int = 0,
         recentGames: int = 0,
         history: str = "false",
+        db_path: str | os.PathLike[str] | None = None,
+        *,
+        request: ExplorerRequest | None = None,
+        cache_store=None,
     ):
-        self.fen = fen
-        self.variant = variant
-        self.play = play
-        self.speeds = speeds
-        self._ratings = ratings
-        self.since = since
-        self.until = until
-        self.moves = moves
-        self._topGames = topGames
-        self._recentGames = recentGames
-        self.history = history
-        self._response = None
+        ratings_value = (
+            ratings if ratings is not None else list(DEFAULT_EXPLORER_RATINGS)
+        )
+        self._request = request or ExplorerRequest(
+            fen=fen,
+            variant=variant,
+            play=play,
+            speeds=speeds,
+            ratings=ratings_value,
+            since=since,
+            until=until,
+            moves=moves,
+            topGames=topGames,
+            recentGames=recentGames,
+            history=history,
+        )
+
+        ctx = ExplorerQueryContext(
+            fen=self._request.fen,
+            variant=self._request.variant,
+            play=self._request.play,
+            speeds=self._request.speeds,
+            ratings=self._request.ratings_str(),
+            since=self._request.since,
+            until=self._request.until,
+            moves=self._request.moves,
+            top_games=int(self._request.topGames),
+            recent_games=int(self._request.recentGames),
+            history=self._request.history,
+        )
+
+        store = cache_store
+        if store is None:
+            store = DuckDbExplorerStore(DuckDb(db_path=db_path))
+
+        super().__init__(ctx=ctx, cache_store=store)
 
     @property
     def ratings(self) -> str:
-        return ",".join(str(r) for r in self._ratings)
+        return self._request.ratings_str()
 
     @property
     def topGames(self) -> str:
-        return str(self._topGames)
+        return str(self._request.topGames)
 
     @property
     def recentGames(self) -> str:
-        return str(self._recentGames)
+        return str(self._request.recentGames)
 
     @property
     def params(self) -> dict[str, str]:
-        return {
-            "variant": self.variant,
-            "fen": self.fen,
-            "play": self.play,
-            "speeds": self.speeds,
-            "ratings": self.ratings,
-            "since": self.since,
-            "until": self.until,
-            "moves": self.moves,
-            "topGames": self.topGames,
-            "recentGames": self.recentGames,
-            "history": self.history,
-        }
+        return self._request.params()
 
     async def raw_explorer(
         self,
         retries: int = 6,
         backoff: float = 1.0,
         jitter: float = 0.3,
+        *,
+        use_cache: bool = True,
     ):
         """Fetch explorer data with exponential backoff and Retry-After support."""
+
+        if use_cache and self._response is not None:
+            self._last_response_source = "cache"
+            return self._response
 
         last_error: httpx.HTTPStatusError | None = None
         delay = max(0.1, backoff)
@@ -104,6 +131,8 @@ class LichessExplorerApi:
                         continue
                     raise
                 self._response = ExplorerResponse(**response.json())
+                self._record(self._response)
+                self._last_response_source = "network"
                 return self._response
 
         if last_error:
@@ -155,6 +184,36 @@ class LichessExplorerApi:
             (m["san"], m["white"] + m["draws"] + m["black"])
             for m in self.response.moves
         ]
+
+    def _hydrate(self, payload: dict) -> "ExplorerResponse":
+        return ExplorerResponse(**payload)
+
+    def _serialize(self, response: "ExplorerResponse") -> dict:
+        return response.to_dict()
+
+    @property
+    def fen(self) -> str:
+        return self._request.fen
+
+    @property
+    def variant(self) -> str:
+        return self._request.variant
+
+    @property
+    def play(self) -> str:
+        return self._request.play
+
+    @property
+    def speeds(self) -> str:
+        return self._request.speeds
+
+    @property
+    def moves(self) -> str:
+        return self._request.moves
+
+    @property
+    def history(self) -> str:
+        return self._request.history
 
     def top_p_pct_moves(
         self,

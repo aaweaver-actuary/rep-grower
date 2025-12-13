@@ -9,17 +9,35 @@ from typing import Any
 
 import duckdb
 
+from .cache import CacheContext, CacheStore
+from .config import Config
+
+
+@dataclass(frozen=True)
+class TableSchema:
+    name: str
+    ddl: str
+
+
 DEFAULT_FILEPATH = "~/.stockfish.db"
 ENV_VAR = "REP_GROW_STOCKFISH_DB"
 
 
-def _resolve_db_path(db_path: str | os.PathLike[str] | None = None) -> str:
-    candidate = db_path or os.environ.get(ENV_VAR, DEFAULT_FILEPATH)
+def _resolve_db_path(
+    db_path: str | os.PathLike[str] | None = None,
+    config: Config | None = None,
+) -> str:
+    cfg = config or Config(
+        stockfish_db_default=DEFAULT_FILEPATH, stockfish_db_env=ENV_VAR
+    )
+    candidate = db_path or os.environ.get(
+        cfg.stockfish_db_env, cfg.stockfish_db_default
+    )
     return str(Path(candidate).expanduser())
 
 
 @dataclass
-class DbQueryContext:
+class DbQueryContext(CacheContext):
     fen: str
     multipv: int
     depth: int
@@ -35,11 +53,57 @@ class DbQueryContext:
         return int.from_bytes(hash_bytes, byteorder="big")
 
 
+@dataclass
+class ExplorerQueryContext(CacheContext):
+    fen: str
+    variant: str
+    play: str
+    speeds: str
+    ratings: str
+    since: str
+    until: str
+    moves: str
+    top_games: int
+    recent_games: int
+    history: str
+
+    def key(self) -> str:
+        parts = (
+            self.fen,
+            self.variant,
+            self.play,
+            self.speeds,
+            self.ratings,
+            self.since,
+            self.until,
+            self.moves,
+            str(self.top_games),
+            str(self.recent_games),
+            self.history,
+        )
+        return "|".join(parts)
+
+    def __hash__(self) -> int:
+        import hashlib
+
+        key_bytes = self.key().encode("utf-8")
+        hash_bytes = hashlib.sha256(key_bytes).digest()
+        return int.from_bytes(hash_bytes, byteorder="big")
+
+
 class DuckDb:
     """Wrapper around DuckDB connection for storing Stockfish evaluations, so they can be reused and retrieved quickly by hashing FENs."""
 
-    def __init__(self, db_path: str | os.PathLike[str] | None = None):
-        self.db_path = _resolve_db_path(db_path)
+    def __init__(
+        self,
+        db_path: str | os.PathLike[str] | None = None,
+        *,
+        config: Config | None = None,
+    ):
+        self._config = config or Config(
+            stockfish_db_default=DEFAULT_FILEPATH, stockfish_db_env=ENV_VAR
+        )
+        self.db_path = _resolve_db_path(db_path, self._config)
         self._conn = None
 
         self.initialize_db()
@@ -72,18 +136,45 @@ class DuckDb:
         return int.from_bytes(hash_bytes, byteorder="big")
 
     def initialize_db(self):
-        """Create necessary table if it doesn't exist."""
-        query = """
-            CREATE TABLE IF NOT EXISTS positions (
-                eval_id HUGEINT PRIMARY KEY,
-                fen TEXT,
-                multipv INTEGER DEFAULT 10,
-                depth INTEGER DEFAULT 20,
-                evaluation JSON,
-                last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-            """
-        self(query)
+        """Create necessary tables if they don't exist."""
+        schemas = [
+            TableSchema(
+                name="positions",
+                ddl="""
+                CREATE TABLE IF NOT EXISTS positions (
+                    eval_id HUGEINT PRIMARY KEY,
+                    fen TEXT,
+                    multipv INTEGER DEFAULT 10,
+                    depth INTEGER DEFAULT 20,
+                    evaluation JSON,
+                    last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+                """,
+            ),
+            TableSchema(
+                name="explorer",
+                ddl="""
+                CREATE TABLE IF NOT EXISTS explorer (
+                    explorer_id HUGEINT PRIMARY KEY,
+                    fen TEXT,
+                    variant TEXT,
+                    play TEXT,
+                    speeds TEXT,
+                    ratings TEXT,
+                    since TEXT,
+                    until TEXT,
+                    moves TEXT,
+                    top_games INTEGER,
+                    recent_games INTEGER,
+                    history TEXT,
+                    response JSON,
+                    last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+                """,
+            ),
+        ]
+        for schema in schemas:
+            self(schema.ddl)
 
     def get(self, ctx: DbQueryContext) -> dict[str, Any] | None:
         """Retrieve evaluation for the given FEN, or None if not found."""
@@ -118,3 +209,93 @@ class DuckDb:
             query,
             (eval_id, ctx.fen, ctx.multipv, ctx.depth, payload, timestamp),
         )
+
+    def get_explorer(self, ctx: ExplorerQueryContext) -> dict[str, Any] | None:
+        """Retrieve explorer response for the given context, or None if missing."""
+        explorer_id = hash(ctx)
+        query = "SELECT response FROM explorer WHERE explorer_id = ?;"
+        result = self(query, (explorer_id,))
+
+        row = result.fetchone()
+        if row is None:
+            return None
+
+        payload = row[0]
+        if isinstance(payload, (bytes, bytearray)):
+            payload = payload.decode("utf-8")
+        if isinstance(payload, str):
+            return json.loads(payload)
+        return payload
+
+    def put_explorer(self, response: dict, ctx: ExplorerQueryContext) -> None:
+        """Store explorer response for the given context; updates on conflict."""
+        explorer_id = hash(ctx)
+        payload = json.dumps(response)
+        timestamp = datetime.now()
+        query = """
+            INSERT INTO explorer (
+                explorer_id,
+                fen,
+                variant,
+                play,
+                speeds,
+                ratings,
+                since,
+                until,
+                moves,
+                top_games,
+                recent_games,
+                history,
+                response,
+                last_updated
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (explorer_id) DO UPDATE
+            SET response = EXCLUDED.response,
+                last_updated = EXCLUDED.last_updated;
+            """
+        self(
+            query,
+            (
+                explorer_id,
+                ctx.fen,
+                ctx.variant,
+                ctx.play,
+                ctx.speeds,
+                ctx.ratings,
+                ctx.since,
+                ctx.until,
+                ctx.moves,
+                ctx.top_games,
+                ctx.recent_games,
+                ctx.history,
+                payload,
+                timestamp,
+            ),
+        )
+
+
+class DuckDbStockfishStore(CacheStore[DbQueryContext]):
+    """Cache store adapter for Stockfish evaluations."""
+
+    def __init__(self, db: DuckDb):
+        self._db = db
+
+    def get(self, ctx: DbQueryContext) -> dict[str, Any] | None:
+        return self._db.get(ctx)
+
+    def put(self, payload: dict[str, Any], ctx: DbQueryContext) -> None:
+        self._db.put(payload, ctx)
+
+
+class DuckDbExplorerStore(CacheStore[ExplorerQueryContext]):
+    """Cache store adapter for Lichess Explorer responses."""
+
+    def __init__(self, db: DuckDb):
+        self._db = db
+
+    def get(self, ctx: ExplorerQueryContext) -> dict[str, Any] | None:
+        return self._db.get_explorer(ctx)
+
+    def put(self, payload: dict[str, Any], ctx: ExplorerQueryContext) -> None:
+        self._db.put_explorer(payload, ctx)

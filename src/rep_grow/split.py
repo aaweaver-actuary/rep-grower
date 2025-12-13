@@ -3,6 +3,7 @@ from __future__ import annotations
 import chess
 import click
 
+from .cli_options import SplitOptions
 from .repertoire import Repertoire
 from .repertoire_splitter import RepertoireSplitter
 
@@ -46,17 +47,14 @@ def click_main(
     trim_event_prefix: bool,
 ) -> None:
     """Split a repertoire PGN into multiple games with bounded move counts."""
-
-    side_color = chess.WHITE if side.lower() == "white" else chess.BLACK
-    repertoire = Repertoire.from_pgn_file(side=side_color, pgn_path=pgn_file)
-    splitter = RepertoireSplitter(repertoire)
-    events = splitter.split_events(max_moves=max_moves)
-    event_names = splitter.compact_event_names(events) if trim_event_prefix else None
-    splitter.write_events(events, output_path=output_path, event_names=event_names)
-
-    click.echo(
-        f"Created {len(events)} games at {output_path} (max {max_moves} moves each)"
+    options = SplitOptions(
+        pgn_file=pgn_file,
+        side=side,
+        output_path=output_path,
+        max_moves=max_moves,
+        trim_event_prefix=trim_event_prefix,
     )
+    _run_split(options)
 
 
 def main() -> None:
@@ -65,3 +63,20 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+def _run_split(options: SplitOptions) -> None:
+    side_color = chess.WHITE if options.side.lower() == "white" else chess.BLACK
+    repertoire = Repertoire.from_pgn_file(side=side_color, pgn_path=options.pgn_file)
+    splitter = RepertoireSplitter(repertoire)
+    events = splitter.split_events(max_moves=options.max_moves)
+    event_names = (
+        splitter.compact_event_names(events) if options.trim_event_prefix else None
+    )
+    splitter.write_events(
+        events, output_path=options.output_path, event_names=event_names
+    )
+
+    click.echo(
+        f"Created {len(events)} games at {options.output_path} (max {options.max_moves} moves each)"
+    )

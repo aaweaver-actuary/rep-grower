@@ -3,6 +3,8 @@ from __future__ import annotations
 import httpx
 from pydantic import BaseModel, Field
 
+from .requests import LichessAnalysisRequest
+
 
 class LichessAnalysisApi:
     BASE_URL = "https://lichess.org/api/cloud-eval"
@@ -14,15 +16,19 @@ class LichessAnalysisApi:
         variant: str = "standard",
         *,
         best_score_threshold: int = 20,
+        request: LichessAnalysisRequest | None = None,
     ):
-        self.fen = fen
-        self.multi_pv = multi_pv
-        self.variant = variant
-        self.best_score_threshold = best_score_threshold
+        self._request = request or LichessAnalysisRequest(
+            fen=fen,
+            multi_pv=multi_pv,
+            variant=variant,
+            best_score_threshold=best_score_threshold,
+        )
+        self.best_score_threshold = self._request.best_score_threshold
         self._response = None
 
     def params(self):
-        return {"fen": self.fen, "multiPv": str(self.multi_pv), "variant": self.variant}
+        return self._request.params()
 
     async def raw_evaluation(self) -> EvalResponse:
         async with httpx.AsyncClient() as client:
@@ -78,6 +84,18 @@ class LichessAnalysisApi:
     @property
     def best_moves(self):
         return self.moves_within(self.best_score_threshold)
+
+    @property
+    def fen(self) -> str:
+        return self._request.fen
+
+    @property
+    def multi_pv(self) -> int:
+        return self._request.multi_pv
+
+    @property
+    def variant(self) -> str:
+        return self._request.variant
 
 
 class EvalResponse(BaseModel):

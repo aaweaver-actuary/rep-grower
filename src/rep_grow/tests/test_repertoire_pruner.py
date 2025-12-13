@@ -124,3 +124,19 @@ def test_preferred_moves_compare_using_frequency():
     selection = pruner.player_move_selection()
 
     assert selection[target_fen]["san"] == "Bc4"
+
+
+def test_preferred_move_labels_are_normalized():
+    rep = Repertoire(side=chess.WHITE, initial_san="")
+    rep.play_initial_moves()
+    root = rep.root_node
+
+    # Bias frequencies toward e4 so preference must override counts.
+    rep.branch_from(root, ["e4", "e5", "Nf3"])
+    rep.branch_from(root, ["e4", "c5", "Nc3"])
+    rep.branch_from(root, ["Nf3", "d5", "g3"])
+
+    pruner = RepertoirePruner(rep, preferred_moves={"  nf3+  "})
+    selection = pruner.player_move_selection()
+
+    assert selection[root.fen]["san"] == "Nf3"

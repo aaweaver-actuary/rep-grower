@@ -136,6 +136,42 @@ def test_cli_requires_exactly_one_source(cli_runner):
     assert "but not both" in result_both.output
 
 
+def test_cli_rejects_invalid_numeric_flags(cli_runner):
+    engine_path = existing_binary()
+
+    result_max_moves = cli_runner.invoke(
+        click_main,
+        [
+            "--side",
+            "white",
+            "--initial-san",
+            "e4",
+            "--max-player-moves",
+            "0",
+            "--engine-path",
+            engine_path,
+        ],
+    )
+    assert result_max_moves.exit_code == 2
+    assert "--max-player-moves" in result_max_moves.output
+
+    result_engine_pool = cli_runner.invoke(
+        click_main,
+        [
+            "--side",
+            "white",
+            "--initial-san",
+            "e4",
+            "--engine-path",
+            engine_path,
+            "--engine-pool-size",
+            "0",
+        ],
+    )
+    assert result_engine_pool.exit_code == 2
+    assert "--engine-pool-size" in result_engine_pool.output
+
+
 def test_cli_initial_san_flow(cli_runner, tmp_path, stub_repertoire):
     engine_path = existing_binary()
     output_dir = tmp_path / "out"

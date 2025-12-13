@@ -3,6 +3,7 @@ import chess
 import click
 
 from . import _core
+from .cli_options import GrowOptions
 from .repertoire import Repertoire, RepertoireConfig
 
 
@@ -105,101 +106,22 @@ def click_main(
     explorer_min_game_share: float,
     max_player_moves: int | None,
 ):
-    if bool(initial_san) == bool(pgn_file):
-        raise click.UsageError(
-            "You must provide either --initial-san or --pgn-file, but not both."
-        )
-
-    if max_player_moves is not None and max_player_moves < 1:
-        raise click.BadParameter(
-            "--max-player-moves must be a positive integer.",
-            param_hint="--max-player-moves",
-        )
-    if engine_pool_size is not None and engine_pool_size < 1:
-        raise click.BadParameter(
-            "--engine-pool-size must be a positive integer.",
-            param_hint="--engine-pool-size",
-        )
-
-    side_color = chess.WHITE if side.lower() == "white" else chess.BLACK
-
-    config = RepertoireConfig(
-        stockfish_multi_pv=engine_multi_pv,
-        stockfish_depth=engine_depth,
-        stockfish_engine_path=engine_path,
-        stockfish_best_score_threshold=best_score_threshold,
-        stockfish_pool_size=engine_pool_size,
+    options = GrowOptions(
+        initial_san=initial_san,
+        pgn_file=pgn_file,
+        iterations=iterations,
+        output_dir=output_dir,
+        side=side,
+        engine_path=engine_path,
+        engine_depth=engine_depth,
+        engine_pool_size=engine_pool_size,
+        engine_multi_pv=engine_multi_pv,
+        best_score_threshold=best_score_threshold,
         explorer_pct=explorer_pct,
         explorer_min_game_share=explorer_min_game_share,
+        max_player_moves=max_player_moves,
     )
-
-    if pgn_file:
-        rep = Repertoire.from_pgn_file(
-            side=side_color,
-            pgn_path=pgn_file,
-            config=config,
-        )
-    else:
-        rep = Repertoire.from_str(
-            side,
-            initial_san,
-            config=config,
-        )
-        rep.play_initial_moves()
-
-    click.echo("PGN:")
-    click.echo(rep.pgn)
-
-    initial_moves = _initial_moves_slug(rep.initial_san)
-    if iterations > 0:
-        for iteration in range(1, iterations + 1):
-            player_nodes, opponent_nodes = _leaf_turn_counts(rep, max_player_moves)
-            total_targets = player_nodes + opponent_nodes
-            click.echo(
-                f"Iteration {iteration}: expanding {player_nodes} player-turn and {opponent_nodes} opponent-turn leaf nodes..."
-            )
-            before_moves = _repertoire_move_count(rep)
-
-            if total_targets > 0:
-                label = (
-                    f"Iteration {iteration} progress"
-                    if iterations > 1
-                    else "Expanding repertoire"
-                )
-
-                with click.progressbar(
-                    length=total_targets,
-                    label=f"{label} ({total_targets} nodes)",
-                ) as node_bar:
-
-                    def _progress_callback(_node):
-                        node_bar.update(1)
-
-                    asyncio.run(
-                        rep.expand_leaves_by_turn(
-                            max_player_moves=max_player_moves,
-                            progress_callback=_progress_callback,
-                        )
-                    )
-            else:
-                asyncio.run(
-                    rep.expand_leaves_by_turn(max_player_moves=max_player_moves)
-                )
-
-            after_moves = _repertoire_move_count(rep)
-            added_moves = max(0, after_moves - before_moves)
-            click.echo(
-                f"    Added {added_moves} SAN moves this pass (total {after_moves})."
-            )
-
-            filename = f"{output_dir}/{initial_moves}__iteration_{iteration}.pgn"
-            rep.export_pgn(filename)
-            click.echo(f"    Exported repertoire to {filename}")
-
-    click.echo("\nFinal PGN with all engine variations:")
-    final_filename = f"{output_dir}/{initial_moves}.pgn"
-    rep.export_pgn(final_filename)
-    click.echo(f"Exported repertoire to {final_filename}")
+    _run_grow(options)
 
 
 def main():
@@ -248,3 +170,109 @@ def _leaf_turn_counts(
 
 def _repertoire_move_count(rep: Repertoire) -> int:
     return sum(len(node.children) for node in rep.nodes_by_fen.values())
+
+
+def _run_grow(options: GrowOptions) -> None:
+    _validate_grow_options(options)
+
+    side_color = chess.WHITE if options.side.lower() == "white" else chess.BLACK
+
+    config = RepertoireConfig(
+        stockfish_multi_pv=options.engine_multi_pv,
+        stockfish_depth=options.engine_depth,
+        stockfish_engine_path=options.engine_path,
+        stockfish_best_score_threshold=options.best_score_threshold,
+        stockfish_pool_size=options.engine_pool_size,
+        explorer_pct=options.explorer_pct,
+        explorer_min_game_share=options.explorer_min_game_share,
+    )
+
+    if options.pgn_file:
+        rep = Repertoire.from_pgn_file(
+            side=side_color,
+            pgn_path=options.pgn_file,
+            config=config,
+        )
+    else:
+        rep = Repertoire.from_str(
+            options.side,
+            options.initial_san,
+            config=config,
+        )
+        rep.play_initial_moves()
+
+    click.echo("PGN:")
+    click.echo(rep.pgn)
+
+    initial_moves = _initial_moves_slug(rep.initial_san)
+    if options.iterations > 0:
+        for iteration in range(1, options.iterations + 1):
+            player_nodes, opponent_nodes = _leaf_turn_counts(
+                rep, options.max_player_moves
+            )
+            total_targets = player_nodes + opponent_nodes
+            click.echo(
+                f"Iteration {iteration}: expanding {player_nodes} player-turn and {opponent_nodes} opponent-turn leaf nodes..."
+            )
+            before_moves = _repertoire_move_count(rep)
+
+            if total_targets > 0:
+                label = (
+                    f"Iteration {iteration} progress"
+                    if options.iterations > 1
+                    else "Expanding repertoire"
+                )
+
+                with click.progressbar(
+                    length=total_targets,
+                    label=f"{label} ({total_targets} nodes)",
+                ) as node_bar:
+
+                    def _progress_callback(_node):
+                        node_bar.update(1)
+
+                    asyncio.run(
+                        rep.expand_leaves_by_turn(
+                            max_player_moves=options.max_player_moves,
+                            progress_callback=_progress_callback,
+                        )
+                    )
+            else:
+                asyncio.run(
+                    rep.expand_leaves_by_turn(max_player_moves=options.max_player_moves)
+                )
+
+            after_moves = _repertoire_move_count(rep)
+            added_moves = max(0, after_moves - before_moves)
+            click.echo(
+                f"    Added {added_moves} SAN moves this pass (total {after_moves})."
+            )
+
+            filename = (
+                f"{options.output_dir}/{initial_moves}__iteration_{iteration}.pgn"
+            )
+            rep.export_pgn(filename)
+            click.echo(f"    Exported repertoire to {filename}")
+
+    click.echo("\nFinal PGN with all engine variations:")
+    final_filename = f"{options.output_dir}/{initial_moves}.pgn"
+    rep.export_pgn(final_filename)
+    click.echo(f"Exported repertoire to {final_filename}")
+
+
+def _validate_grow_options(options: GrowOptions) -> None:
+    if not options.has_exactly_one_source():
+        raise click.UsageError(
+            "You must provide either --initial-san or --pgn-file, but not both."
+        )
+
+    if options.max_player_moves is not None and options.max_player_moves < 1:
+        raise click.BadParameter(
+            "--max-player-moves must be a positive integer.",
+            param_hint="--max-player-moves",
+        )
+    if options.engine_pool_size is not None and options.engine_pool_size < 1:
+        raise click.BadParameter(
+            "--engine-pool-size must be a positive integer.",
+            param_hint="--engine-pool-size",
+        )

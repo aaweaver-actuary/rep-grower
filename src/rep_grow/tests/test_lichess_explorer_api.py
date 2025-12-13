@@ -1,6 +1,10 @@
-from rep_grow.lichess_explorer_api import LichessExplorerApi, ExplorerResponse
-import pytest
+import asyncio
+from datetime import datetime, timedelta, timezone
+
 import httpx
+import pytest
+
+from rep_grow.lichess_explorer_api import ExplorerResponse, LichessExplorerApi
 
 
 def _fake_api_with_moves(move_totals: list[tuple[str, int]]) -> LichessExplorerApi:
@@ -210,3 +214,127 @@ def test_top_p_pct_moves_skips_tiny_tail_when_pct_met():
 def test_top_p_pct_moves_handles_zero_games():
     api = _fake_api_with_moves([])
     assert api.top_p_pct_moves() == []
+
+
+@pytest.mark.asyncio
+async def test_raw_explorer_uses_cache_short_circuit(monkeypatch):
+    api = LichessExplorerApi(fen="cached")
+    api._response = ExplorerResponse(  # type: ignore[attr-defined]
+        opening=None,
+        white=1,
+        draws=0,
+        black=0,
+        moves=[],
+        recentGames=[],
+        topGames=[],
+    )
+
+    class FailClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def get(self, *args, **kwargs):  # pragma: no cover - should not run
+            raise AssertionError("network should not be invoked when cache is warm")
+
+    monkeypatch.setattr(httpx, "AsyncClient", FailClient)
+
+    result = await api.raw_explorer(use_cache=True)
+
+    assert result is api._response
+    assert api.last_response_source == "cache"
+
+
+@pytest.mark.asyncio
+async def test_raw_explorer_retries_with_retry_after_seconds(monkeypatch):
+    req = httpx.Request("GET", LichessExplorerApi.BASE_URL)
+
+    error = httpx.Response(429, headers={"Retry-After": "1"}, request=req)
+    payload = {
+        "opening": None,
+        "white": 1,
+        "draws": 0,
+        "black": 0,
+        "moves": [],
+        "recentGames": [],
+        "topGames": [],
+    }
+    success = httpx.Response(200, json=payload, request=req)
+    responses = [error, success]
+    calls: list[dict | None] = []
+
+    class StubClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def get(self, *args, **kwargs):
+            calls.append(kwargs.get("params"))
+            return responses.pop(0)
+
+    monkeypatch.setattr(httpx, "AsyncClient", StubClient)
+
+    slept: list[float] = []
+
+    async def fake_sleep(delay: float):
+        slept.append(delay)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    api = LichessExplorerApi(fen="retry")
+    result = await api.raw_explorer(retries=2, backoff=0.1, jitter=0.0, use_cache=False)
+
+    assert result.totalGames == 1
+    assert api.last_response_source == "network"
+    assert len(calls) == 2
+    assert slept and slept[0] >= 1.0  # respects Retry-After header
+
+
+@pytest.mark.asyncio
+async def test_raw_explorer_raises_last_error_when_retries_exhausted(monkeypatch):
+    req = httpx.Request("GET", LichessExplorerApi.BASE_URL)
+    failure = httpx.Response(503, request=req)
+    responses = [failure, failure]
+
+    class StubClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def get(self, *args, **kwargs):
+            return responses.pop(0)
+
+    monkeypatch.setattr(httpx, "AsyncClient", StubClient)
+
+    async def fake_sleep(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    api = LichessExplorerApi(fen="fail")
+
+    with pytest.raises(httpx.HTTPStatusError) as excinfo:
+        await api.raw_explorer(retries=2, backoff=0.01, jitter=0.0, use_cache=False)
+
+    err = excinfo.value
+    assert isinstance(err, httpx.HTTPStatusError)
+    assert err.response is not None
+    assert err.response.status_code == 503
+
+
+def test_parse_retry_after_http_date():
+    future = datetime.now(timezone.utc) + timedelta(seconds=2)
+    header = future.strftime("%a, %d %b %Y %H:%M:%S GMT")
+    delay = LichessExplorerApi._parse_retry_after(header)
+
+    assert delay is not None
+    assert 0.0 <= delay <= 2.5

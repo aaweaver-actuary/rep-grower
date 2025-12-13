@@ -143,6 +143,33 @@ async def test_scores_within_threshold():
         )
 
 
+@pytest.mark.asyncio
+async def test_raw_evaluation_raises_runtime_and_leaves_response_empty(monkeypatch):
+    fen = "fail-fen"
+    api = LichessAnalysisApi(fen=fen, multi_pv=1, variant="standard")
+
+    req = httpx.Request("GET", api.BASE_URL)
+    failure = httpx.Response(500, request=req)
+
+    class StubClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def get(self, *args, **kwargs):
+            return failure
+
+    monkeypatch.setattr(httpx, "AsyncClient", StubClient)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await api.raw_evaluation()
+
+    assert "500" in str(excinfo.value)
+    assert getattr(api, "_response", None) is None
+
+
 # After 1. e4 e5 2. Bc4 a6 3. Nf3 a5 4. Ng5 a4 5. Bxf7+ there is only one legal move for Black: Ke7
 # FEN: rnbqkbnr/1ppp1Bpp/8/4p1N1/p3P3/8/PPPP1PPP/RNBQK2R b KQkq - 0 5
 @pytest.mark.asyncio

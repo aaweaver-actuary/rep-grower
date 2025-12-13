@@ -3,6 +3,7 @@ import io
 
 import chess
 import chess.pgn as chess_pgn
+import httpx
 import pytest
 
 from rep_grow.fen import canonical_fen
@@ -243,6 +244,27 @@ def test_repertoire_pgn():
     )
 
 
+def test_merge_game_nodes_combines_comments(tmp_path):
+    pgn = """[Event "G1"]
+
+1. e4 {A} e5 *
+
+[Event "G2"]
+
+1. e4 {B} e5 *
+"""
+    path = tmp_path / "merge.pgn"
+    path.write_text(pgn, encoding="utf-8")
+
+    rep = Repertoire.from_pgn_file(side=chess.WHITE, pgn_path=path)
+
+    game = rep.game
+    mainline_iter = iter(game.mainline())
+    first_move = next(mainline_iter).comment
+    assert "A" in first_move
+    assert "B" in first_move
+
+
 @pytest.mark.asyncio
 async def test_raw_evaluation(fake_stockfish):
     san = "e4 e5 Nf3 Nc6 Bc4 a6"
@@ -309,6 +331,30 @@ async def test_parallel_add_engine_variations_processes_all_leaf_nodes(fake_stoc
 
 
 @pytest.mark.asyncio
+async def test_add_engine_variations_reports_progress(fake_stockfish):
+    fake_stockfish.moves_to_return = ["c7c5"]
+
+    rep = Repertoire(side=chess.WHITE, initial_san="")
+    rep.play_initial_moves()
+
+    node_a = rep.branch_from(rep.root_node, ["e4"])
+    node_b = rep.branch_from(rep.root_node, ["d4"])
+
+    seen: list[str] = []
+
+    def _progress(node: RepertoireNode):
+        seen.append(node.fen)
+
+    await rep.add_engine_variations(
+        nodes=[node_a, node_b],
+        max_concurrency=1,
+        progress_callback=_progress,
+    )
+
+    assert set(seen) == {node_a.fen, node_b.fen}
+
+
+@pytest.mark.asyncio
 async def test_add_explorer_variations_for_node_skips_existing_moves(fake_explorer):
     rep = Repertoire(side=chess.WHITE, initial_san="")
     rep.play_initial_moves()
@@ -360,6 +406,52 @@ async def test_parallel_add_explorer_variations(fake_explorer):
         board = chess.Board(node.fen)
         for expected in moves:
             assert any(board.san(var.move) == expected for var in pgn_node.variations)
+
+
+@pytest.mark.asyncio
+async def test_add_explorer_variations_recovers_from_http_errors(monkeypatch):
+    error_fen_board = chess.Board()
+    error_fen_board.push_san("d4")
+    error_fen = error_fen_board.fen()
+
+    ok_board = chess.Board()
+    ok_board.push_san("e4")
+
+    request = httpx.Request("GET", "https://example.test")
+    error_response = httpx.Response(429, request=request)
+
+    class FlakyExplorer:
+        def __init__(self, fen, **_kwargs):
+            self.fen = fen
+
+        async def raw_explorer(self):
+            if self.fen == error_fen:
+                raise httpx.HTTPStatusError(
+                    "rate limited",
+                    request=request,
+                    response=error_response,
+                )
+            return self
+
+        def top_p_pct_moves(self, pct, max_moves=None, min_game_share=None):  # noqa: ARG002
+            if self.fen == error_fen:
+                return []
+            return [{"move": "c5", "total": 100}]
+
+    monkeypatch.setattr("rep_grow.repertoire.LichessExplorerApi", FlakyExplorer)
+
+    rep = Repertoire(side=chess.WHITE, initial_san="")
+    rep.play_initial_moves()
+    bad_node = rep.branch_from(rep.root_node, ["d4"])
+    good_node = rep.branch_from(rep.root_node, ["e4"])
+
+    result = await rep.add_explorer_variations(
+        nodes=[bad_node, good_node],
+        max_concurrency=2,
+    )
+
+    assert result[bad_node.fen] == []
+    assert result[good_node.fen] == ["c5"]
 
 
 def test_repertoire_graph_deduplicates_transpositions():

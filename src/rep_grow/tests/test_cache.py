@@ -7,6 +7,7 @@ import pytest
 
 from rep_grow.lichess_explorer_api import LichessExplorerApi
 from rep_grow.stockfish_analysis_api import StockfishAnalysisApi
+from rep_grow.lichess_analysis_api import LichessAnalysisApi
 from rep_grow.db import DuckDb, DbQueryContext, ExplorerQueryContext
 
 
@@ -227,3 +228,93 @@ async def test_stockfish_uses_db_before_engine(monkeypatch, tmp_path):
 
     assert api.last_response_source == "cache"
     assert cached.moves[0][1] == "e2e4"
+
+
+@pytest.mark.asyncio
+async def test_lichess_cache_persists(monkeypatch, tmp_path):
+    payload: FakeEval = {
+        "depth": 18,
+        "fen": "8/8/8/8/8/8/8/8 w - - 0 1",
+        "knodes": 12,
+        "pvs": [
+            {"cp": 30, "moves": "e2e4 e7e5"},
+        ],
+    }
+
+    call_count = {"count": 0}
+
+    async def fake_request(*args, **kwargs):  # noqa: ARG001
+        call_count["count"] += 1
+        return httpx.Response(
+            200,
+            json=payload,
+            request=httpx.Request("GET", LichessAnalysisApi.BASE_URL),
+        )
+
+    class DummyAsyncClient:
+        async def __aenter__(self_inner):
+            return self_inner
+
+        async def __aexit__(self_inner, exc_type, exc, tb):  # noqa: ARG002
+            return False
+
+        async def get(self_inner, *args, **kwargs):  # noqa: ARG002
+            return await fake_request(*args, **kwargs)
+
+    def client_factory(*args, **kwargs):  # noqa: ARG001
+        return DummyAsyncClient()
+
+    monkeypatch.setattr(
+        "rep_grow.lichess_analysis_api.httpx.AsyncClient", client_factory
+    )
+
+    db_path = tmp_path / "cache.duckdb"
+    api = LichessAnalysisApi(fen=payload["fen"], multi_pv=1, db_path=db_path)
+
+    first = await api.raw_evaluation()
+    assert api.last_response_source == "network"
+    assert call_count["count"] == 1
+    assert first.moves[0][1] == "e2e4"
+
+    api_again = LichessAnalysisApi(fen=payload["fen"], multi_pv=1, db_path=db_path)
+    cached = await api_again.raw_evaluation()
+
+    assert api_again.last_response_source == "cache"
+    assert call_count["count"] == 1
+    assert cached.pvs == first.pvs
+
+
+def test_cache_separates_providers(tmp_path):
+    db_path = tmp_path / "cache.duckdb"
+    db = DuckDb(db_path=db_path)
+
+    ctx_stockfish = DbQueryContext(
+        fen="8/8/8/8/8/8/8/8 w - - 0 1", multipv=1, depth=12, provider="stockfish"
+    )
+    ctx_lichess = DbQueryContext(
+        fen=ctx_stockfish.fen, multipv=1, depth=0, provider="lichess"
+    )
+
+    sf_payload: FakeEval = {
+        "depth": 12,
+        "fen": ctx_stockfish.fen,
+        "knodes": 10,
+        "pvs": [{"cp": 15, "moves": "e2e4 e7e5"}],
+    }
+    lc_payload: FakeEval = {
+        "depth": 0,
+        "fen": ctx_stockfish.fen,
+        "knodes": 5,
+        "pvs": [{"cp": 25, "moves": "d2d4 d7d5"}],
+    }
+
+    db.put(sf_payload, ctx_stockfish)
+    db.put(lc_payload, ctx_lichess)
+
+    sf_cached = db.get(ctx_stockfish)
+    lc_cached = db.get(ctx_lichess)
+
+    assert sf_cached is not None
+    assert lc_cached is not None
+    assert sf_cached["pvs"][0]["moves"].startswith("e2e4")
+    assert lc_cached["pvs"][0]["moves"].startswith("d2d4")

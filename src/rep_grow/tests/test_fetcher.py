@@ -79,3 +79,28 @@ def test_cached_fetcher_records_when_missing():
     assert store.put_calls[-1][0] == {"value": 5}
     assert store.put_calls[-1][1] == ctx
     assert len(store.get_calls) == 1
+
+
+class DummyNoCacheFetcher(CachedFetcher[DummyCtx, dict]):
+    def __init__(self, ctx: DummyCtx):
+        super().__init__(ctx=ctx, cache_store=None)
+
+    def fetch(self, value: dict) -> dict:
+        self._response = value
+        return self._record(self._response)
+
+    def _hydrate(self, payload: dict) -> dict:
+        return dict(payload)
+
+    def _serialize(self, response: dict) -> dict:
+        return dict(response)
+
+
+def test_cached_fetcher_record_without_store_is_noop():
+    ctx = DummyCtx("ctx3")
+    fetcher = DummyNoCacheFetcher(ctx)
+
+    result = fetcher.fetch({"value": 9})
+
+    assert result == {"value": 9}
+    assert fetcher.last_response_source == "uninitialized"

@@ -61,7 +61,12 @@ class StockfishAnalysisApi(CachedFetcher[DbQueryContext, EvalResponse]):
         self.best_score_threshold = req.best_score_threshold
         self._last_response_source = "uninitialized"
 
-        ctx = DbQueryContext(fen=req.fen, multipv=req.multi_pv, depth=req.depth)
+        ctx = DbQueryContext(
+            fen=req.fen,
+            multipv=req.multi_pv,
+            depth=req.depth,
+            provider="stockfish",
+        )
 
         store = cache_store
         if store is None:
@@ -115,26 +120,47 @@ class StockfishAnalysisApi(CachedFetcher[DbQueryContext, EvalResponse]):
 
     @property
     def best_move(self):
-        moves = self.moves
-        if not moves:
+        scored = self.response._scored_moves()
+        if not scored:
             return None
-        return moves[0][1]
+        return scored[0].move
 
     @property
     def best_score(self):
-        moves = self.moves
-        if not moves:
+        scored = self.response._scored_moves()
+        if not scored:
             return None
-        return moves[0][0]
+        return scored[0].score
 
     def scores_within(self, threshold: int):
-        best_score = self.best_score
-        if best_score is None:
+        scored = self.response._scored_moves()
+        if not scored:
             return []
+
+        mate_candidates = [
+            sm
+            for sm in scored
+            if sm.is_winning_mate
+            and sm.mate_distance is not None
+            and sm.mate_distance < 10
+        ]
+        if mate_candidates:
+            closest = min(
+                sm.mate_distance
+                for sm in mate_candidates
+                if sm.mate_distance is not None
+            )
+            return [
+                (sm.score, sm.move)
+                for sm in scored
+                if sm.is_winning_mate and sm.mate_distance == closest
+            ]
+
+        best_score = scored[0].score
         return [
-            (score, move)
-            for score, move in self.moves
-            if abs(score - best_score) <= threshold
+            (sm.score, sm.move)
+            for sm in scored
+            if abs(sm.score - best_score) <= threshold
         ]
 
     def moves_within(self, threshold: int):

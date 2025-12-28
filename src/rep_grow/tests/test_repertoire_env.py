@@ -3,29 +3,28 @@ import pytest
 import asyncio
 import time
 
-from rep_grow.repertoire import ExplorerRateLimiter, _env_float, _env_int
+from rep_grow.repertoire import ExplorerRateLimiter, RuntimeConfig
 
 
-def test_env_int_parses_and_falls_back(monkeypatch):
-    monkeypatch.delenv("REP_GROW_TEST_INT", raising=False)
-    assert _env_int("REP_GROW_TEST_INT", 3) == 3
+def test_runtime_config_parses_and_falls_back(monkeypatch):
+    monkeypatch.delenv("REP_GROW_EXPLORER_MAX_CONCURRENCY", raising=False)
+    monkeypatch.delenv("REP_GROW_EXPLORER_MIN_DELAY", raising=False)
 
-    monkeypatch.setenv("REP_GROW_TEST_INT", "7")
-    assert _env_int("REP_GROW_TEST_INT", 3) == 7
+    defaults = RuntimeConfig.from_env()
+    assert defaults.explorer_max_concurrency == 1
+    assert defaults.explorer_min_delay == 1.0
 
-    monkeypatch.setenv("REP_GROW_TEST_INT", "not-a-number")
-    assert _env_int("REP_GROW_TEST_INT", 9) == 9
+    monkeypatch.setenv("REP_GROW_EXPLORER_MAX_CONCURRENCY", "3")
+    monkeypatch.setenv("REP_GROW_EXPLORER_MIN_DELAY", "0.25")
+    parsed = RuntimeConfig.from_env()
+    assert parsed.explorer_max_concurrency == 3
+    assert parsed.explorer_min_delay == 0.25
 
-
-def test_env_float_parses_and_falls_back(monkeypatch):
-    monkeypatch.delenv("REP_GROW_TEST_FLOAT", raising=False)
-    assert _env_float("REP_GROW_TEST_FLOAT", 1.5) == 1.5
-
-    monkeypatch.setenv("REP_GROW_TEST_FLOAT", "2.75")
-    assert _env_float("REP_GROW_TEST_FLOAT", 1.5) == 2.75
-
-    monkeypatch.setenv("REP_GROW_TEST_FLOAT", "invalid")
-    assert _env_float("REP_GROW_TEST_FLOAT", 0.25) == 0.25
+    monkeypatch.setenv("REP_GROW_EXPLORER_MAX_CONCURRENCY", "invalid")
+    monkeypatch.setenv("REP_GROW_EXPLORER_MIN_DELAY", "bad")
+    fallback = RuntimeConfig.from_env()
+    assert fallback.explorer_max_concurrency == 1
+    assert fallback.explorer_min_delay == 1.0
 
 
 @pytest.mark.asyncio

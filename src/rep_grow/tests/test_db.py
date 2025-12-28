@@ -1,3 +1,5 @@
+import duckdb
+
 from rep_grow.db import (
     DuckDb,
     DbQueryContext,
@@ -163,3 +165,32 @@ def test_duckdb_explorer_store_round_trip(tmp_path):
     result = store.get(ctx)
 
     assert result == payload
+
+
+def test_duckdb_migrates_provider_column(tmp_path):
+    legacy_path = tmp_path / "legacy.duckdb"
+    # Create legacy table without provider column.
+    conn = duckdb.connect(str(legacy_path))
+    conn.sql(
+        """
+        CREATE TABLE positions (
+            eval_id HUGEINT PRIMARY KEY,
+            fen TEXT,
+            multipv INTEGER DEFAULT 10,
+            depth INTEGER DEFAULT 20,
+            evaluation JSON,
+            last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        """
+    )
+    conn.close()
+
+    db = DuckDb(str(legacy_path))
+    ctx = DbQueryContext(fen=FEN, multipv=2, depth=18, provider="stockfish")
+
+    # Should not raise when writing; provider column should now exist.
+    db.put(sample_evaluation(score=33), ctx)
+
+    columns = db.conn.sql("PRAGMA table_info('positions')").fetchall()
+    column_names = {row[1] for row in columns}
+    assert "provider" in column_names

@@ -41,9 +41,10 @@ class DbQueryContext(CacheContext):
     fen: str
     multipv: int
     depth: int
+    provider: str = "stockfish"
 
     def key(self) -> str:
-        return f"{self.fen}|{self.multipv}|{self.depth}"
+        return f"{self.provider}|{self.fen}|{self.multipv}|{self.depth}"
 
     def __hash__(self) -> int:
         import hashlib
@@ -143,6 +144,7 @@ class DuckDb:
                 ddl="""
                 CREATE TABLE IF NOT EXISTS positions (
                     eval_id HUGEINT PRIMARY KEY,
+                    provider TEXT DEFAULT 'stockfish',
                     fen TEXT,
                     multipv INTEGER DEFAULT 10,
                     depth INTEGER DEFAULT 20,
@@ -176,6 +178,16 @@ class DuckDb:
         for schema in schemas:
             self(schema.ddl)
 
+        # Migrate legacy caches that predate the provider column.
+        self._ensure_provider_column()
+
+    def _ensure_provider_column(self) -> None:
+        columns = self("PRAGMA table_info('positions')").fetchall()
+        column_names = {row[1] for row in columns}
+        if "provider" not in column_names:
+            # Existing rows default to stockfish; future writes set explicit provider.
+            self("ALTER TABLE positions ADD COLUMN provider TEXT DEFAULT 'stockfish'")
+
     def get(self, ctx: DbQueryContext) -> dict[str, Any] | None:
         """Retrieve evaluation for the given FEN, or None if not found."""
         eval_id = hash(ctx)
@@ -199,15 +211,23 @@ class DuckDb:
         payload = json.dumps(evaluation)
         timestamp = datetime.now()
         query = """
-            INSERT INTO positions (eval_id, fen, multipv, depth, evaluation, last_updated)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO positions (eval_id, provider, fen, multipv, depth, evaluation, last_updated)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (eval_id) DO UPDATE
             SET evaluation = EXCLUDED.evaluation,
                 last_updated = EXCLUDED.last_updated;
             """
         self(
             query,
-            (eval_id, ctx.fen, ctx.multipv, ctx.depth, payload, timestamp),
+            (
+                eval_id,
+                ctx.provider,
+                ctx.fen,
+                ctx.multipv,
+                ctx.depth,
+                payload,
+                timestamp,
+            ),
         )
 
     def get_explorer(self, ctx: ExplorerQueryContext) -> dict[str, Any] | None:

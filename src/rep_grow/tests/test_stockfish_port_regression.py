@@ -21,7 +21,7 @@ def _require_engine() -> Path:
     return path
 
 
-def test_rust_stockfish_matches_python_speed():
+def test_rust_stockfish_matches_python_speed():  # pragma: no cover
     if not os.getenv("REP_GROW_RUN_ENGINE_TESTS"):
         pytest.skip("Set REP_GROW_RUN_ENGINE_TESTS=1 to run engine parity test")
     engine_path = _require_engine()

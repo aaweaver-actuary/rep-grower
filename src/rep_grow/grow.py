@@ -1,10 +1,22 @@
 import asyncio
 import chess
 import click
+from dataclasses import dataclass
 
 from . import _core
 from .cli_options import GrowOptions
 from .repertoire import Repertoire, RepertoireConfig
+
+
+@dataclass(frozen=True)
+class GrowRunConfig:
+    side_color: chess.Color
+    initial_san: str
+    pgn_file: str | None
+    iterations: int
+    output_dir: str
+    max_player_moves: int | None
+    repertoire_config: RepertoireConfig
 
 
 @click.command()
@@ -80,6 +92,19 @@ from .repertoire import Repertoire, RepertoireConfig
     help="Moves within this centipawn threshold of the best score will be added.",
 )
 @click.option(
+    "--analysis-provider",
+    type=click.Choice(["stockfish", "lichess", "hybrid"], case_sensitive=False),
+    default="stockfish",
+    help="Select analysis backend: local Stockfish, Lichess cloud, or hybrid (cloud with local fallback).",
+)
+@click.option(
+    "--lichess-eval-path",
+    type=click.Path(exists=False, dir_okay=False, path_type=str),
+    default=None,
+    help="Path to a lichess_db_eval.jsonl.zst file for offline/static evaluations.",
+    show_default=False,
+)
+@click.option(
     "--explorer-pct",
     type=float,
     default=95.0,
@@ -88,8 +113,18 @@ from .repertoire import Repertoire, RepertoireConfig
 @click.option(
     "--explorer-min-game-share",
     type=float,
-    default=0.05,
-    help="Minimum game share for explorer move selection. Overrides top-p if a move's share is below this threshold.",
+    default=5.0,
+    help="Minimum game share (percent) for explorer move selection. Overrides top-p if a move's share is below this threshold.",
+)
+@click.option(
+    "--min-games-reached",
+    type=int,
+    default=None,
+    help=(
+        "Skip expanding leaf nodes whose recorded games_reached count is below this"
+        " threshold. Useful for pruning low-popularity branches."
+    ),
+    show_default=False,
 )
 def click_main(
     initial_san: str,
@@ -102,9 +137,12 @@ def click_main(
     engine_pool_size: int | None,
     engine_multi_pv: int,
     best_score_threshold: int,
+    analysis_provider: str,
     explorer_pct: float,
     explorer_min_game_share: float,
     max_player_moves: int | None,
+    min_games_reached: int | None,
+    lichess_eval_path: str | None,
 ):
     options = GrowOptions(
         initial_san=initial_san,
@@ -117,11 +155,16 @@ def click_main(
         engine_pool_size=engine_pool_size,
         engine_multi_pv=engine_multi_pv,
         best_score_threshold=best_score_threshold,
+        analysis_provider=analysis_provider,
         explorer_pct=explorer_pct,
         explorer_min_game_share=explorer_min_game_share,
         max_player_moves=max_player_moves,
+        min_games_reached=min_games_reached,
+        lichess_eval_path=lichess_eval_path,
     )
-    _run_grow(options)
+    _validate_grow_options(options)
+    run_config = _build_run_config(options)
+    _run_grow(run_config)
 
 
 def main():
@@ -145,8 +188,40 @@ def _initial_moves_slug(initial_san: str) -> str:
     return slug
 
 
+def _build_run_config(options: GrowOptions) -> GrowRunConfig:
+    side_color = chess.WHITE if options.side.lower() == "white" else chess.BLACK
+
+    def _pct_to_fraction(value: float) -> float:
+        return value / 100.0
+
+    rep_config = RepertoireConfig(
+        stockfish_multi_pv=options.engine_multi_pv,
+        stockfish_depth=options.engine_depth,
+        stockfish_engine_path=options.engine_path,
+        stockfish_best_score_threshold=options.best_score_threshold,
+        stockfish_pool_size=options.engine_pool_size,
+        explorer_pct=options.explorer_pct,
+        explorer_min_game_share=_pct_to_fraction(options.explorer_min_game_share),
+        min_games_reached=options.min_games_reached,
+        analysis_provider=options.analysis_provider,
+        lichess_eval_path=options.lichess_eval_path,
+    )
+
+    return GrowRunConfig(
+        side_color=side_color,
+        initial_san=options.initial_san,
+        pgn_file=options.pgn_file or None,
+        iterations=options.iterations,
+        output_dir=options.output_dir,
+        max_player_moves=options.max_player_moves,
+        repertoire_config=rep_config,
+    )
+
+
 def _leaf_turn_counts(
-    rep: Repertoire, max_player_moves: int | None = None
+    rep: Repertoire,
+    max_player_moves: int | None = None,
+    min_games_reached: int | None = None,
 ) -> tuple[int, int]:
     leaves = rep.leaf_nodes
     if not leaves:
@@ -158,7 +233,13 @@ def _leaf_turn_counts(
     move_counts = [rep.player_move_count(node) for node in leaves]
     player_nodes = 0
     opponent_nodes = 0
-    for is_player, move_count in zip(mask, move_counts):
+    for node, is_player, move_count in zip(leaves, mask, move_counts):
+        if (
+            min_games_reached is not None
+            and node.games_reached is not None
+            and node.games_reached < min_games_reached
+        ):
+            continue
         if max_player_moves is not None and move_count >= max_player_moves:
             continue
         if is_player:
@@ -172,92 +253,143 @@ def _repertoire_move_count(rep: Repertoire) -> int:
     return sum(len(node.children) for node in rep.nodes_by_fen.values())
 
 
-def _run_grow(options: GrowOptions) -> None:
-    _validate_grow_options(options)
-
-    side_color = chess.WHITE if options.side.lower() == "white" else chess.BLACK
-
-    config = RepertoireConfig(
-        stockfish_multi_pv=options.engine_multi_pv,
-        stockfish_depth=options.engine_depth,
-        stockfish_engine_path=options.engine_path,
-        stockfish_best_score_threshold=options.best_score_threshold,
-        stockfish_pool_size=options.engine_pool_size,
-        explorer_pct=options.explorer_pct,
-        explorer_min_game_share=options.explorer_min_game_share,
-    )
-
-    if options.pgn_file:
+def _load_grow_repertoire(run_config: GrowRunConfig) -> Repertoire:
+    if run_config.pgn_file:
         rep = Repertoire.from_pgn_file(
-            side=side_color,
-            pgn_path=options.pgn_file,
-            config=config,
+            side=run_config.side_color,
+            pgn_path=run_config.pgn_file,
+            config=run_config.repertoire_config,
         )
     else:
         rep = Repertoire.from_str(
-            options.side,
-            options.initial_san,
-            config=config,
+            "white" if run_config.side_color == chess.WHITE else "black",
+            run_config.initial_san,
+            config=run_config.repertoire_config,
         )
         rep.play_initial_moves()
+    return rep
+
+
+def _iteration_label(iteration: int, *, total_targets: int, iterations: int) -> str:
+    if iterations > 1:
+        return f"Iteration {iteration} progress ({total_targets} nodes)"
+    return f"Expanding repertoire ({total_targets} nodes)"
+
+
+def _expand_repertoire_pass(
+    rep: Repertoire,
+    *,
+    run_config: GrowRunConfig,
+    total_targets: int,
+    label: str,
+) -> None:
+    if total_targets > 0:
+        with click.progressbar(length=total_targets, label=label) as node_bar:
+
+            def _progress_callback(_node):
+                node_bar.update(1)
+
+            asyncio.run(
+                rep.expand_leaves_by_turn(
+                    max_player_moves=run_config.max_player_moves,
+                    min_games_reached=run_config.repertoire_config.min_games_reached,
+                    progress_callback=_progress_callback,
+                )
+            )
+    else:
+        asyncio.run(
+            rep.expand_leaves_by_turn(
+                max_player_moves=run_config.max_player_moves,
+                min_games_reached=run_config.repertoire_config.min_games_reached,
+            )
+        )
+
+
+def _export_iteration_snapshot(
+    rep: Repertoire,
+    *,
+    run_config: GrowRunConfig,
+    initial_moves_slug: str,
+    iteration: int,
+) -> str:
+    filename = (
+        f"{run_config.output_dir}/{initial_moves_slug}__iteration_{iteration}.pgn"
+    )
+    rep.export_pgn(filename)
+    click.echo(f"    Exported repertoire to {filename}")
+    return filename
+
+
+def _run_single_iteration(
+    rep: Repertoire,
+    *,
+    iteration: int,
+    iterations: int,
+    run_config: GrowRunConfig,
+    initial_moves_slug: str,
+) -> None:
+    player_nodes, opponent_nodes = _leaf_turn_counts(
+        rep,
+        run_config.max_player_moves,
+        run_config.repertoire_config.min_games_reached,
+    )
+    total_targets = player_nodes + opponent_nodes
+    click.echo(
+        f"Iteration {iteration}: expanding {player_nodes} player-turn and {opponent_nodes} opponent-turn leaf nodes..."
+    )
+    before_moves = _repertoire_move_count(rep)
+
+    label = _iteration_label(
+        iteration, total_targets=total_targets, iterations=iterations
+    )
+    _expand_repertoire_pass(
+        rep,
+        run_config=run_config,
+        total_targets=total_targets,
+        label=label,
+    )
+
+    after_moves = _repertoire_move_count(rep)
+    added_moves = max(0, after_moves - before_moves)
+    click.echo(f"    Added {added_moves} SAN moves this pass (total {after_moves}).")
+
+    _export_iteration_snapshot(
+        rep,
+        run_config=run_config,
+        initial_moves_slug=initial_moves_slug,
+        iteration=iteration,
+    )
+
+
+def _export_final_repertoire(
+    rep: Repertoire, *, run_config: GrowRunConfig, initial_moves_slug: str
+) -> None:
+    click.echo("\nFinal PGN with all engine variations:")
+    final_filename = f"{run_config.output_dir}/{initial_moves_slug}.pgn"
+    rep.export_pgn(final_filename)
+    click.echo(f"Exported repertoire to {final_filename}")
+
+
+def _run_grow(run_config: GrowRunConfig) -> None:
+    rep = _load_grow_repertoire(run_config)
 
     click.echo("PGN:")
     click.echo(rep.pgn)
 
     initial_moves = _initial_moves_slug(rep.initial_san)
-    if options.iterations > 0:
-        for iteration in range(1, options.iterations + 1):
-            player_nodes, opponent_nodes = _leaf_turn_counts(
-                rep, options.max_player_moves
-            )
-            total_targets = player_nodes + opponent_nodes
-            click.echo(
-                f"Iteration {iteration}: expanding {player_nodes} player-turn and {opponent_nodes} opponent-turn leaf nodes..."
-            )
-            before_moves = _repertoire_move_count(rep)
-
-            if total_targets > 0:
-                label = (
-                    f"Iteration {iteration} progress"
-                    if options.iterations > 1
-                    else "Expanding repertoire"
-                )
-
-                with click.progressbar(
-                    length=total_targets,
-                    label=f"{label} ({total_targets} nodes)",
-                ) as node_bar:
-
-                    def _progress_callback(_node):
-                        node_bar.update(1)
-
-                    asyncio.run(
-                        rep.expand_leaves_by_turn(
-                            max_player_moves=options.max_player_moves,
-                            progress_callback=_progress_callback,
-                        )
-                    )
-            else:
-                asyncio.run(
-                    rep.expand_leaves_by_turn(max_player_moves=options.max_player_moves)
-                )
-
-            after_moves = _repertoire_move_count(rep)
-            added_moves = max(0, after_moves - before_moves)
-            click.echo(
-                f"    Added {added_moves} SAN moves this pass (total {after_moves})."
+    if run_config.iterations > 0:
+        for iteration in range(1, run_config.iterations + 1):
+            _run_single_iteration(
+                rep,
+                iteration=iteration,
+                iterations=run_config.iterations,
+                run_config=run_config,
+                initial_moves_slug=initial_moves,
             )
 
-            filename = (
-                f"{options.output_dir}/{initial_moves}__iteration_{iteration}.pgn"
-            )
-            rep.export_pgn(filename)
-            click.echo(f"    Exported repertoire to {filename}")
-
-    click.echo("\nFinal PGN with all engine variations:")
-    final_filename = f"{options.output_dir}/{initial_moves}.pgn"
-    rep.export_pgn(final_filename)
-    click.echo(f"Exported repertoire to {final_filename}")
+    _export_final_repertoire(
+        rep, run_config=run_config, initial_moves_slug=initial_moves
+    )
 
 
 def _validate_grow_options(options: GrowOptions) -> None:
@@ -271,8 +403,23 @@ def _validate_grow_options(options: GrowOptions) -> None:
             "--max-player-moves must be a positive integer.",
             param_hint="--max-player-moves",
         )
+    if options.min_games_reached is not None and options.min_games_reached < 1:
+        raise click.BadParameter(
+            "--min-games-reached must be a positive integer.",
+            param_hint="--min-games-reached",
+        )
     if options.engine_pool_size is not None and options.engine_pool_size < 1:
         raise click.BadParameter(
             "--engine-pool-size must be a positive integer.",
             param_hint="--engine-pool-size",
+        )
+    if options.explorer_pct <= 0 or options.explorer_pct > 100:
+        raise click.BadParameter(
+            "--explorer-pct must be between 0 and 100 (percent).",
+            param_hint="--explorer-pct",
+        )
+    if options.explorer_min_game_share <= 0 or options.explorer_min_game_share > 100:
+        raise click.BadParameter(
+            "--explorer-min-game-share must be between 0 and 100 (percent).",
+            param_hint="--explorer-min-game-share",
         )

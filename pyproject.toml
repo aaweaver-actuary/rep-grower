@@ -18,6 +18,7 @@ version="0.1.0"
 
     [project.scripts]
     annotate-reach-counts="rep_grow.annotate_reach_counts:main"
+    build                ="rep_grow.build:main"
     export-anki          ="rep_grow.export_repertoire_to_anki_csv:main"
     freq                 ="rep_grow.frequencies:main"
     grow                 ="rep_grow.grow:main"

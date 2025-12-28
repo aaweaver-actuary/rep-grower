@@ -1,203 +1,35 @@
 {
   "opening": null,
-  "white": 3481599354,
-  "draws": 273104950,
-  "black": 3239429472,
+  "white": 1200,
+  "draws": 300,
+  "black": 500,
   "moves": [
     {
       "uci": "e2e4",
       "san": "e4",
-      "averageRating": 1607,
-      "white": 2024802747,
-      "draws": 156655361,
-      "black": 1909673174,
-      "game": null,
+      "white": 600,
+      "draws": 100,
+      "black": 200,
       "opening": {
-        "eco": "B00",
-        "name": "King's Pawn Game"
+        "eco": "C20",
+        "name": "KP"
       }
     },
     {
       "uci": "d2d4",
       "san": "d4",
-      "averageRating": 1680,
-      "white": 885452841,
-      "draws": 71149327,
-      "black": 798711696,
-      "game": null,
-      "opening": {
-        "eco": "A40",
-        "name": "Queen's Pawn Game"
-      }
-    },
-    {
-      "uci": "g1f3",
-      "san": "Nf3",
-      "averageRating": 1784,
-      "white": 126990549,
-      "draws": 10798134,
-      "black": 110773077,
-      "game": null,
-      "opening": {
-        "eco": "A04",
-        "name": "Zukertort Opening"
-      }
+      "white": 400,
+      "draws": 100,
+      "black": 100,
+      "opening": null
     },
     {
       "uci": "c2c4",
       "san": "c4",
-      "averageRating": 1755,
-      "white": 115447217,
-      "draws": 9454990,
-      "black": 102547688,
-      "game": null,
-      "opening": {
-        "eco": "A10",
-        "name": "English Opening"
-      }
-    },
-    {
-      "uci": "e2e3",
-      "san": "e3",
-      "averageRating": 1567,
-      "white": 73703844,
-      "draws": 5396783,
-      "black": 75362112,
-      "game": null,
-      "opening": {
-        "eco": "A00",
-        "name": "Van't Kruijs Opening"
-      }
-    },
-    {
-      "uci": "g2g3",
-      "san": "g3",
-      "averageRating": 1707,
-      "white": 60916330,
-      "draws": 4757937,
-      "black": 55686949,
-      "game": null,
-      "opening": {
-        "eco": "A00",
-        "name": "Hungarian Opening"
-      }
-    },
-    {
-      "uci": "b2b3",
-      "san": "b3",
-      "averageRating": 1755,
-      "white": 55650659,
-      "draws": 4079861,
-      "black": 50593814,
-      "game": null,
-      "opening": {
-        "eco": "A01",
-        "name": "Nimzo-Larsen Attack"
-      }
-    },
-    {
-      "uci": "d2d3",
-      "san": "d3",
-      "averageRating": 1667,
-      "white": 31694199,
-      "draws": 2406897,
-      "black": 31863078,
-      "game": null,
-      "opening": {
-        "eco": "A00",
-        "name": "Mieses Opening"
-      }
-    },
-    {
-      "uci": "f2f4",
-      "san": "f4",
-      "averageRating": 1736,
-      "white": 32421888,
-      "draws": 2457161,
-      "black": 30436399,
-      "game": null,
-      "opening": {
-        "eco": "A02",
-        "name": "Bird Opening"
-      }
-    },
-    {
-      "uci": "b1c3",
-      "san": "Nc3",
-      "averageRating": 1671,
-      "white": 21207926,
-      "draws": 1595166,
-      "black": 20091286,
-      "game": null,
-      "opening": {
-        "eco": "A00",
-        "name": "Van Geet Opening"
-      }
-    },
-    {
-      "uci": "b2b4",
-      "san": "b4",
-      "averageRating": 1686,
-      "white": 15291557,
-      "draws": 1104069,
-      "black": 13314933,
-      "game": null,
-      "opening": {
-        "eco": "A00",
-        "name": "Polish Opening"
-      }
-    },
-    {
-      "uci": "c2c3",
-      "san": "c3",
-      "averageRating": 1676,
-      "white": 10960026,
-      "draws": 798343,
-      "black": 10784857,
-      "game": null,
-      "opening": {
-        "eco": "A00",
-        "name": "Saragossa Opening"
-      }
-    },
-    {
-      "uci": "g2g4",
-      "san": "g4",
-      "averageRating": 1613,
-      "white": 9865050,
-      "draws": 722567,
-      "black": 9751864,
-      "game": null,
-      "opening": {
-        "eco": "A00",
-        "name": "Grob Opening"
-      }
-    },
-    {
-      "uci": "f2f3",
-      "san": "f3",
-      "averageRating": 1656,
-      "white": 4304239,
-      "draws": 358345,
-      "black": 4976375,
-      "game": null,
-      "opening": {
-        "eco": "A00",
-        "name": "Barnes Opening"
-      }
-    },
-    {
-      "uci": "h2h4",
-      "san": "h4",
-      "averageRating": 1465,
-      "white": 3532390,
-      "draws": 433785,
-      "black": 4404463,
-      "game": null,
-      "opening": {
-        "eco": "A00",
-        "name": "Kádas Opening"
-      }
+      "white": 200,
+      "draws": 100,
+      "black": 200,
+      "opening": null
     }
   ],
   "recentGames": [],

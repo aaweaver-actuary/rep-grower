@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Dict, Iterable
 
 import chess
@@ -13,16 +14,51 @@ from .repertoire_analysis import (
 )
 
 
+@dataclass(frozen=True)
+class PreferenceSet:
+    labels: set[str]
+
+    @classmethod
+    def from_iterable(cls, preferred_moves: Iterable[str] | None) -> "PreferenceSet":
+        labels: set[str] = set()
+        if preferred_moves:
+            for raw in preferred_moves:
+                if raw is None:
+                    continue
+                normalized = cls._normalize_label(raw)
+                if normalized:
+                    labels.add(normalized)
+        return cls(labels=labels)
+
+    @staticmethod
+    def _normalize_label(value: str) -> str:
+        trimmed = value.strip()
+        if not trimmed:
+            return ""
+        trimmed = trimmed.rstrip("+#!?")
+        return trimmed.casefold()
+
+    def is_preferred(self, board: chess.Board, move: chess.Move) -> bool:
+        if not self.labels:
+            return False
+        san_key = self._normalize_label(board.san(move))
+        uci_key = self._normalize_label(move.uci())
+        return san_key in self.labels or uci_key in self.labels
+
+
 class RepertoirePruner:
     def __init__(
         self,
         repertoire: Repertoire,
         *,
-        preferred_moves: Iterable[str] | None = None,
+        preferred_moves: Iterable[str] | PreferenceSet | None = None,
     ):
         self.repertoire = repertoire
         self._pgn_node_map: dict[int, RepertoireNode] | None = None
-        self._preferred_labels = self._normalize_preferred_moves(preferred_moves)
+        if isinstance(preferred_moves, PreferenceSet):
+            self._preferences = preferred_moves
+        else:
+            self._preferences = PreferenceSet.from_iterable(preferred_moves)
 
     def player_move_frequencies(self) -> Dict[MoveFingerprint, int]:
         return _player_move_frequencies(self.repertoire)
@@ -36,7 +72,7 @@ class RepertoirePruner:
         for fen, ranked in rankings.items():
             board = chess.Board(fen)
             for entry in ranked:
-                preferred = self._is_preferred_move(board, entry["move"])
+                preferred = self._preferences.is_preferred(board, entry["move"])
                 entry["preferred"] = preferred
             ranked.sort(
                 key=lambda item: (
@@ -103,32 +139,3 @@ class RepertoirePruner:
             new_child.comment = variation.comment
             new_child.nags = set(variation.nags)
             self._copy_variations(variation, new_child, selection, mapping)
-
-    def _normalize_preferred_moves(
-        self, preferred_moves: Iterable[str] | None
-    ) -> set[str]:
-        labels: set[str] = set()
-        if not preferred_moves:
-            return labels
-        for raw in preferred_moves:
-            if raw is None:
-                continue
-            normalized = self._normalize_label(raw)
-            if normalized:
-                labels.add(normalized)
-        return labels
-
-    @staticmethod
-    def _normalize_label(value: str) -> str:
-        trimmed = value.strip()
-        if not trimmed:
-            return ""
-        trimmed = trimmed.rstrip("+#!?")
-        return trimmed.casefold()
-
-    def _is_preferred_move(self, board: chess.Board, move: chess.Move) -> bool:
-        if not self._preferred_labels:
-            return False
-        san_key = self._normalize_label(board.san(move))
-        uci_key = self._normalize_label(move.uci())
-        return san_key in self._preferred_labels or uci_key in self._preferred_labels

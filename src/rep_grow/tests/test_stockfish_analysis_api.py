@@ -165,6 +165,45 @@ async def test_handles_mate_scores_when_cp_missing(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_best_moves_prioritize_forced_mate_over_high_cp(monkeypatch):
+    response = stockfish_payload(
+        fen="start",
+        pvs=[
+            {"cp": 900, "score": 900, "moves": "e2e4 e7e5"},
+            {"mate": 8, "score": 8, "moves": "d1h5 g7g6"},
+            {"cp": 120, "score": 120, "moves": "g1f3 g8f6"},
+        ],
+    )
+    install_fake_eval(monkeypatch, response)
+
+    api = StockfishAnalysisApi("start", multi_pv=3, best_score_threshold=30)
+    await api.raw_evaluation()
+
+    assert api.best_move == "d1h5"
+    assert api.best_moves == ["d1h5"]
+
+
+@pytest.mark.asyncio
+async def test_best_moves_choose_shortest_available_mate(monkeypatch):
+    response = stockfish_payload(
+        fen="start",
+        pvs=[
+            {"mate": 8, "score": 8, "moves": "a2a4 a7a5"},
+            {"mate": 4, "score": 4, "moves": "d1h5 g7g6"},
+            {"cp": 70, "score": 70, "moves": "g1f3 g8f6"},
+        ],
+    )
+    install_fake_eval(monkeypatch, response)
+
+    api = StockfishAnalysisApi("start", multi_pv=3, best_score_threshold=50)
+    await api.raw_evaluation()
+
+    assert api.best_move == "d1h5"
+    assert api.best_moves == ["d1h5"]
+    assert api.moves[0] == (4, "d1h5")
+
+
+@pytest.mark.asyncio
 async def test_missing_engine_raises_runtime(monkeypatch):
     install_fake_eval(
         monkeypatch,

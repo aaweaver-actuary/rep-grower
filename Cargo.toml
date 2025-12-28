@@ -24,6 +24,7 @@ serde={ version="1.0", features=["derive"] }
 serde_json="1.0"
 shakmaty="0.27"
 toml="0.8"
+zstd="0.13"
 
 [features]
 # Keep extension-module optional so cargo test can run without linking to libpython.

@@ -1,6 +1,71 @@
-from rep_grow.lichess_analysis_api import LichessAnalysisApi
-import pytest
+from __future__ import annotations
+
 import httpx
+import pytest
+
+from rep_grow.lichess_analysis_api import LichessAnalysisApi
+
+
+@pytest.fixture(autouse=True)
+def stub_lichess_http(monkeypatch):
+    base_payload: dict = {
+        "depth": 22,
+        "fen": "",
+        "knodes": 123,
+        "pvs": [
+            {"cp": 90, "moves": "e2e4 e7e5 g1f3"},
+            {"cp": 70, "moves": "d2d4 d7d5 c2c4"},
+            {"cp": 50, "moves": "c2c4 e7e5"},
+            {"cp": 20, "moves": "g1f3 d7d5"},
+            {"cp": 5, "moves": "b1c3 c7c5"},
+        ],
+    }
+
+    def payload_for_fen(fen: str) -> dict:
+        if "p1p2ppp" in fen:  # flank-pawn imbalance case
+            return {
+                "depth": 18,
+                "fen": fen,
+                "knodes": 42,
+                "pvs": [{"cp": -120, "moves": "b2b3 a7a5"}],
+            }
+        if "3k1q2/1N2Rp2/3r1P2/p2p3p" in fen:  # only one legal move expected
+            return {
+                "depth": 20,
+                "fen": fen,
+                "knodes": 77,
+                "pvs": [{"cp": -10, "moves": "e7e8q"}],
+            }
+        data = dict(base_payload)
+        data["fen"] = fen
+        data["pvs"] = list(base_payload["pvs"])
+        return data
+
+    class FakeResponse:
+        def __init__(self, fen: str):
+            self.status_code = 200
+            self._fen = fen
+            self.text = ""
+
+        def raise_for_status(self):  # pragma: no cover - trivial
+            return None
+
+        def json(self):
+            return payload_for_fen(self._fen)
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):  # pragma: no cover - trivial
+            return False
+
+        async def get(self, url, params=None):
+            fen = params.get("fen", "") if params else ""
+            return FakeResponse(fen)
+
+    monkeypatch.setattr("httpx.AsyncClient", FakeClient)
+    return base_payload
 
 
 def test_params():
@@ -100,11 +165,54 @@ async def test_best_move_property():
         f"Expected best move {best_move} from moves list, got {api_best_move} from best_move property"
     )
 
-    best_score, best_move = api.response.moves[0]
-    api_best_score = api.best_score
-    assert best_score == api_best_score, (
-        f"Expected best score {best_score} from moves list, got {api_best_score} from best_score property"
+
+@pytest.mark.asyncio
+async def test_prefers_short_forced_mate_over_high_cp(monkeypatch):
+    payload = {
+        "depth": 22,
+        "fen": "start",
+        "knodes": 100,
+        "pvs": [
+            {"mate": 6, "score": 6, "moves": "d1h5 g7g6"},
+            {"cp": 500, "score": 500, "moves": "e2e4 e7e5"},
+            {"cp": 120, "score": 120, "moves": "g1f3 g8f6"},
+        ],
+    }
+
+    class StubResponse:
+        def __init__(self, json_payload):
+            self._json = json_payload
+            self.status_code = 200
+            self.text = "ok"
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._json
+
+    class StubClient:
+        def __init__(self, json_payload):
+            self._payload = json_payload
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def get(self, *args, **kwargs):  # noqa: ARG002
+            return StubResponse(self._payload)
+
+    monkeypatch.setattr(
+        httpx, "AsyncClient", lambda *args, **kwargs: StubClient(payload)
     )
+
+    api = LichessAnalysisApi("start", multi_pv=3, best_score_threshold=30)
+    await api.raw_evaluation()
+
+    assert api.best_move == "d1h5"
+    assert api.best_moves == ["d1h5"]
 
 
 @pytest.mark.asyncio

@@ -15,10 +15,7 @@ def start_fen(side: chess.Color | bool) -> str:
     """Return the canonical starting FEN for the given side to move."""
 
     board = chess.Board()
-    if isinstance(side, bool):
-        board.turn = chess.WHITE if side else chess.BLACK
-    else:
-        board.turn = side
+    board.turn = chess.WHITE if bool(side) else chess.BLACK
     return canonical_fen(board.fen())
 
 

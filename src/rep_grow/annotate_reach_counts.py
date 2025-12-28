@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 import httpx
 from pathlib import Path
-from typing import Iterable
+from typing import Awaitable, Callable, Iterable
 
 import click
 
@@ -38,6 +39,74 @@ async def _fetch_total_games(
     return response.totalGames
 
 
+@dataclass(slots=True)
+class _AnnotationState:
+    updated: int = 0
+    progress_printed: bool = False
+
+
+def _annotate_single_node(
+    node: RepertoireNode,
+    *,
+    force: bool,
+    fetch_total_games: Callable[[str], Awaitable[int | None]],
+) -> Awaitable[bool]:
+    async def runner() -> bool:
+        if node.games_reached is not None and not force:
+            return False
+        try:
+            total_games = await fetch_total_games(node.fen)
+        except Exception:
+            return False
+        if total_games is None:
+            return False
+        node.games_reached = total_games
+        for pgn_node in node.pgn_nodes:
+            pgn_node.comment = upsert_reach_count_tag(pgn_node.comment, total_games)
+        return True
+
+    return runner()
+
+
+def _handle_progress(
+    *,
+    state: _AnnotationState,
+    total_nodes: int,
+    progress_step: int | None,
+    use_progress_bar: bool,
+) -> None:
+    if not use_progress_bar or progress_step is None:
+        return
+    if state.updated % progress_step != 0:
+        return
+    pct = (state.updated / total_nodes) * 100 if total_nodes else 0.0
+    click.echo(f"\rProgress: {state.updated}/{total_nodes} ({pct:.1f}%)", nl=False)
+    state.progress_printed = True
+
+
+def _maybe_checkpoint(
+    *,
+    state: _AnnotationState,
+    repertoire: Repertoire,
+    checkpoint_every: int | None,
+    checkpoint_base: Path | None,
+    dry_run: bool,
+    use_progress_bar: bool,
+) -> None:
+    if dry_run or checkpoint_every is None or checkpoint_base is None:
+        return
+    if state.updated % checkpoint_every != 0:
+        return
+    if use_progress_bar and state.progress_printed:
+        click.echo()  # end progress line before checkpoint message
+        state.progress_printed = False
+    checkpoint_path = checkpoint_base.with_name(
+        f"{checkpoint_base.stem}_checkpoint_{state.updated}{checkpoint_base.suffix}"
+    )
+    checkpoint_path.write_text(repertoire.pgn, encoding="utf-8")
+    click.echo(f"Checkpoint written to {checkpoint_path}")
+
+
 async def _annotate_nodes(
     nodes: Iterable[RepertoireNode],
     *,
@@ -53,65 +122,52 @@ async def _annotate_nodes(
     checkpoint_base: Path | None,
     total_nodes: int,
     dry_run: bool,
+    fetch_total_games: Callable[[str], Awaitable[int | None]] | None = None,
 ) -> int:
     semaphore = asyncio.Semaphore(max(1, max_concurrency))
-    updated = 0
     lock = asyncio.Lock()
+    state = _AnnotationState()
     progress_step: int | None = (
         progress_every if progress_every is not None and progress_every > 0 else None
     )
     use_progress_bar = progress_bar and progress_step is not None and total_nodes > 0
-    progress_printed = False
+    fetch_func = fetch_total_games or (
+        lambda fen: _fetch_total_games(
+            fen, retries=retries, backoff=backoff, jitter=jitter
+        )
+    )
 
     async def annotate(node: RepertoireNode) -> None:
-        nonlocal updated
-        if node.games_reached is not None and not force:
-            return
         async with semaphore:
-            try:
-                total_games = await _fetch_total_games(
-                    node.fen, retries=retries, backoff=backoff, jitter=jitter
-                )
-            except Exception:
-                total_games = None
-        if total_games is None:
+            updated = await _annotate_single_node(
+                node,
+                force=force,
+                fetch_total_games=fetch_func,
+            )
+        if not updated:
             return
-        node.games_reached = total_games
-        for pgn_node in node.pgn_nodes:
-            pgn_node.comment = upsert_reach_count_tag(pgn_node.comment, total_games)
 
         async with lock:
-            updated += 1
-            if (
-                use_progress_bar
-                and progress_step is not None
-                and updated % progress_step == 0
-            ):
-                pct = (updated / total_nodes) * 100 if total_nodes else 0.0
-                click.echo(
-                    f"\rProgress: {updated}/{total_nodes} ({pct:.1f}%)",
-                    nl=False,
-                )
-                progress_printed = True
-            if (
-                checkpoint_every
-                and checkpoint_base is not None
-                and not dry_run
-                and updated % checkpoint_every == 0
-            ):
-                if use_progress_bar and progress_printed:
-                    click.echo()  # finish progress line before checkpoint message
-                    progress_printed = False
-                checkpoint_path = checkpoint_base.with_name(
-                    f"{checkpoint_base.stem}_checkpoint_{updated}{checkpoint_base.suffix}"
-                )
-                checkpoint_path.write_text(repertoire.pgn, encoding="utf-8")
-                click.echo(f"Checkpoint written to {checkpoint_path}")
+            state.updated += 1
+            _handle_progress(
+                state=state,
+                total_nodes=total_nodes,
+                progress_step=progress_step,
+                use_progress_bar=use_progress_bar,
+            )
+            _maybe_checkpoint(
+                state=state,
+                repertoire=repertoire,
+                checkpoint_every=checkpoint_every,
+                checkpoint_base=checkpoint_base,
+                dry_run=dry_run,
+                use_progress_bar=use_progress_bar,
+            )
 
     await asyncio.gather(*(annotate(node) for node in nodes))
-    if use_progress_bar and progress_printed:
+    if use_progress_bar and state.progress_printed:
         click.echo()
-    return updated
+    return state.updated
 
 
 @click.command()
@@ -268,9 +324,9 @@ def click_main(
     click.echo(f"Wrote annotated PGN to {output_path}")
 
 
-def main() -> None:
+def main() -> None:  # pragma: no cover
     click_main(standalone_mode=True)
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
     main()

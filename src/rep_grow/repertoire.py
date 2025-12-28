@@ -10,17 +10,131 @@ import chess.pgn as chess_pgn
 import httpx
 
 from dataclasses import dataclass, field
-from typing import Callable, Iterable
+from typing import Awaitable, Callable, Iterable
 
 from . import _core
 from .fen import canonical_fen
 from .stockfish_analysis_api import StockfishAnalysisApi
+from .analysis_queue import AnalysisQueue, AnalysisTask
+from .lichess_analysis_api import LichessAnalysisApi
 from .lichess_explorer_api import LichessExplorerApi
 from .repertoire_analysis import player_move_rankings as _player_move_rankings
 from .pgn_metadata import extract_reach_count, upsert_reach_count_tag
 
 
 logger = logging.getLogger(__name__)
+
+
+def _best_moves_from_eval_payload(
+    payload: dict,
+    best_score_threshold: int,
+    max_pv: int,
+) -> list[str]:
+    pvs = payload.get("pvs") or []
+    scored: list[tuple[tuple[int, int], str, int, int | None, int | None, bool]] = []
+
+    def _first_move(entry: dict) -> str:
+        moves_val = entry.get("moves") or entry.get("uci") or entry.get("move") or ""
+        if isinstance(moves_val, list):
+            moves_text = " ".join(str(m) for m in moves_val)
+        else:
+            moves_text = str(moves_val)
+        return moves_text.split(" ")[0] if moves_text else ""
+
+    for entry in pvs[: max(1, max_pv)]:
+        move = _first_move(entry)
+        if not move:
+            continue
+        mate = entry.get("mate")
+        cp = entry.get("cp")
+        score = cp if cp is not None else mate
+        if score is None:
+            continue
+        score_int = int(score)
+        mate_distance = abs(int(mate)) if mate is not None else None
+        is_winning_mate = mate is not None and int(mate) > 0
+
+        if is_winning_mate:
+            sort_key = (2, -(mate_distance or 0))
+        elif mate is not None:
+            sort_key = (0, -(mate_distance or 0))
+        else:
+            sort_key = (1, score_int)
+
+        scored.append(
+            (
+                sort_key,
+                move,
+                score_int,
+                mate if mate is not None else None,
+                mate_distance,
+                is_winning_mate,
+            )
+        )
+
+    scored.sort(key=lambda item: item[0], reverse=True)
+    if not scored:
+        return []
+
+    top = scored[0]
+    top_mate = top[3]
+    top_mate_distance = top[4]
+    if top_mate is not None and top_mate > 0 and top_mate_distance is not None:
+        return [
+            move
+            for _, move, _, mate, dist, _ in scored
+            if mate is not None and mate > 0 and dist == top_mate_distance
+        ]
+
+    best_score = top[2]
+    return [
+        move
+        for _, move, score, _, _, _ in scored
+        if abs(score - best_score) <= best_score_threshold
+    ]
+
+
+@dataclass(slots=True)
+class ExpansionContext:
+    targets: list[RepertoireNode]
+    max_concurrency: int
+    graph_lock: asyncio.Lock
+    progress_callback: Callable[["RepertoireNode"], None] | None
+
+
+@dataclass(slots=True, frozen=True)
+class RuntimeConfig:
+    explorer_max_concurrency: int = 1
+    explorer_min_delay: float = 1.0
+
+    @staticmethod
+    def _parse_int(name: str, default: int) -> int:
+        value = os.getenv(name)
+        if value is None:
+            return default
+        try:
+            return int(value)
+        except ValueError:
+            return default
+
+    @staticmethod
+    def _parse_float(name: str, default: float) -> float:
+        value = os.getenv(name)
+        if value is None:
+            return default
+        try:
+            return float(value)
+        except ValueError:
+            return default
+
+    @classmethod
+    def from_env(cls) -> "RuntimeConfig":
+        return cls(
+            explorer_max_concurrency=cls._parse_int(
+                "REP_GROW_EXPLORER_MAX_CONCURRENCY", 1
+            ),
+            explorer_min_delay=cls._parse_float("REP_GROW_EXPLORER_MIN_DELAY", 1.0),
+        )
 
 
 def nodes_from_root(rep: Repertoire, node: RepertoireNode) -> int:
@@ -41,26 +155,6 @@ def nodes_from_root(rep: Repertoire, node: RepertoireNode) -> int:
         current = parent
         count += 1
     return count
-
-
-def _env_int(name: str, default: int) -> int:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    try:
-        return int(value)
-    except ValueError:
-        return default
-
-
-def _env_float(name: str, default: float) -> float:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    try:
-        return float(value)
-    except ValueError:
-        return default
 
 
 def _read_pgn_games(path: Path) -> list[chess_pgn.Game]:
@@ -131,6 +225,11 @@ class RepertoireConfig:
     explorer_pct: float = 90.0
     explorer_max_moves: int | None = None
     explorer_min_game_share: float = 0.05
+    explorer_enabled: bool = True
+    min_games_reached: int | None = None
+    analysis_provider: str = "stockfish"
+    analysis_providers: list[str] | None = None
+    lichess_eval_path: str | None = None
 
 
 @dataclass
@@ -140,6 +239,7 @@ class RepertoireNode:
     parents: set[str] = field(default_factory=set)
     children: dict[str, RepertoireNode] = field(default_factory=dict)
     pgn_nodes: list[chess_pgn.GameNode] = field(default_factory=list)
+    _pgn_node_ids: set[int] = field(default_factory=set, repr=False, compare=False)
     games_reached: int | None = None
 
     def add_parent(self, parent_fen: str):
@@ -147,6 +247,13 @@ class RepertoireNode:
 
     def add_child(self, move: chess.Move, child: RepertoireNode):
         self.children[move.uci()] = child
+
+    def add_pgn_node(self, node: chess_pgn.GameNode) -> None:
+        node_id = id(node)
+        if node_id in self._pgn_node_ids:
+            return
+        self._pgn_node_ids.add(node_id)
+        self.pgn_nodes.append(node)
 
     @property
     def is_root(self) -> bool:
@@ -173,15 +280,20 @@ class Repertoire:
             self.config = RepertoireConfig()
         self.game.setup(self.board)
         root_fen = canonical_fen(self.board.fen())
-        root = RepertoireNode(fen=root_fen, move=None, pgn_nodes=[self.game])
+        root = RepertoireNode(fen=root_fen, move=None)
+        root.add_pgn_node(self.game)
         root_count, _ = extract_reach_count(self.game.comment)
         if root_count is not None:
             root.games_reached = root_count
         self.nodes_by_fen: dict[str, RepertoireNode] = {root_fen: root}
         self.root_node = root
         self.current_node = root
+        self.runtime_config = RuntimeConfig.from_env()
         self._explorer_rate_limiter: ExplorerRateLimiter | None = None
         self._root_player_turn = chess.Board(root_fen).turn == self.side
+        self._analysis_queue: AnalysisQueue | None = None
+        self._analysis_order: list[str] | None = None
+        self._analysis_counts: dict[str, int] = {"lichess": 0, "stockfish": 0}
 
     @classmethod
     def from_str(
@@ -294,9 +406,7 @@ class Repertoire:
 
     async def get_engine_moves(self, node: RepertoireNode | None = None):
         target_node = node or self.current_node
-        api = self._stockfish_api(target_node.fen)
-        await api.raw_evaluation()
-        return api.best_moves
+        return await self._analysis_best_moves(target_node)
 
     def branch_from(
         self, node: RepertoireNode, san_moves: Iterable[str]
@@ -307,7 +417,14 @@ class Repertoire:
         for san in san_moves:
             move = board.parse_san(san)
             board.push(move)
+            parent = current
             current, pgn_node = self._link_child(current, move, board.fen(), pgn_node)
+            # When a node is reached via transposition it can have multiple PGN
+            # nodes; ensure each representation carries the new variation so the
+            # PGN export shows shared future moves from every path.
+            for alt_pgn in parent.pgn_nodes[1:]:
+                alt_child_pgn = self._ensure_pgn_variation(alt_pgn, move)
+                current.add_pgn_node(alt_child_pgn)
         return current
 
     def _pgn_node_for(self, node: RepertoireNode) -> chess_pgn.GameNode:
@@ -329,6 +446,7 @@ class Repertoire:
         move: chess.Move,
         child_fen: str,
         pgn_node: chess_pgn.GameNode,
+        child_pgn_node: chess_pgn.GameNode | None = None,
     ) -> tuple[RepertoireNode, chess_pgn.GameNode]:
         canonical_child_fen = canonical_fen(child_fen)
         child = self.nodes_by_fen.get(canonical_child_fen)
@@ -338,15 +456,13 @@ class Repertoire:
         if child is not self.root_node:
             child.add_parent(parent.fen)
         parent.add_child(move, child)
-        parent_pgn_nodes = parent.pgn_nodes or [pgn_node]
-        for parent_variation in parent_pgn_nodes:
-            variation_node = self._ensure_pgn_variation(parent_variation, move)
-            if variation_node not in child.pgn_nodes:
-                child.pgn_nodes.append(variation_node)
-        child_pgn_node = self._ensure_pgn_variation(pgn_node, move)
-        if child_pgn_node not in child.pgn_nodes:
-            child.pgn_nodes.append(child_pgn_node)
-        return child, child_pgn_node
+        parent.add_pgn_node(pgn_node)
+
+        resolved_child_pgn = child_pgn_node or self._ensure_pgn_variation(
+            pgn_node, move
+        )
+        child.add_pgn_node(resolved_child_pgn)
+        return child, resolved_child_pgn
 
     def _ingest_pgn_tree(
         self,
@@ -354,28 +470,69 @@ class Repertoire:
         rep_node: RepertoireNode,
         board: chess.Board,
     ) -> None:
-        for variation in pgn_node.variations:
-            move = variation.move
-            if move is None:
-                continue
-            board.push(move)
-            child, _ = self._link_child(rep_node, move, board.fen(), pgn_node)
-            count, _ = extract_reach_count(variation.comment)
-            if count is not None:
-                child.games_reached = count
-            self._ingest_pgn_tree(variation, child, board)
-            board.pop()
+        # Use an explicit stack to avoid Python recursion limits on very large repertoires.
+        stack: list[tuple[chess_pgn.GameNode, RepertoireNode, chess.Board]] = [
+            (pgn_node, rep_node, board.copy(stack=False))
+        ]
+
+        while stack:
+            current_pgn, current_rep, current_board = stack.pop()
+            # Iterate in reverse so natural order is preserved when using a stack (pre-order DFS).
+            for variation in reversed(current_pgn.variations):
+                move = variation.move
+                if move is None:
+                    continue
+
+                next_board = current_board.copy(stack=False)
+                next_board.push(move)
+
+                child, _ = self._link_child(
+                    current_rep,
+                    move,
+                    next_board.fen(),
+                    current_pgn,
+                    child_pgn_node=variation,
+                )
+                count, _ = extract_reach_count(variation.comment)
+                if count is not None:
+                    child.games_reached = count
+
+                stack.append((variation, child, next_board))
 
     def _mainline_node(self, node: RepertoireNode | None = None) -> chess_pgn.GameNode:
         return self._pgn_node_for(node or self.current_node)
 
+    def _sort_variations_by_reach(
+        self, rep_node: RepertoireNode, pgn_node: chess_pgn.GameNode
+    ) -> None:
+        """Order PGN variations so higher reach counts lead the main line."""
+
+        def reach_score(var: chess_pgn.GameNode) -> int:
+            move = var.move
+            if move is None:
+                return -1
+            child = rep_node.children.get(move.uci())
+            if child is None:
+                return -1
+            return child.games_reached if child.games_reached is not None else -1
+
+        # Stable sort to preserve original order for ties.
+        pgn_node.variations.sort(key=reach_score, reverse=True)
+
+        for variation in pgn_node.variations:
+            move = variation.move
+            if move is None:
+                continue
+            child = rep_node.children.get(move.uci())
+            if child is None:
+                continue
+            self._sort_variations_by_reach(child, variation)
+
     def _get_explorer_limiter(self) -> ExplorerRateLimiter:
         if self._explorer_rate_limiter is None:
-            concurrency = max(1, _env_int("REP_GROW_EXPLORER_MAX_CONCURRENCY", 1))
-            delay = max(0.0, _env_float("REP_GROW_EXPLORER_MIN_DELAY", 1.0))
             self._explorer_rate_limiter = ExplorerRateLimiter(
-                max_concurrent=concurrency,
-                min_delay=delay,
+                max_concurrent=self.runtime_config.explorer_max_concurrency,
+                min_delay=self.runtime_config.explorer_min_delay,
             )
         return self._explorer_rate_limiter
 
@@ -385,6 +542,7 @@ class Repertoire:
         *,
         multi_pv: int | None = None,
         depth: int | None = None,
+        best_score_threshold: int | None = None,
     ) -> StockfishAnalysisApi:
         return StockfishAnalysisApi(
             fen,
@@ -392,31 +550,230 @@ class Repertoire:
             engine_path=self.config.stockfish_engine_path,
             depth=depth or self.config.stockfish_depth,
             think_time=self.config.stockfish_think_time,
-            best_score_threshold=self.config.stockfish_best_score_threshold,
+            best_score_threshold=best_score_threshold
+            or self.config.stockfish_best_score_threshold,
             pool_size=self.config.stockfish_pool_size,
         )
 
+    def _lichess_api(
+        self,
+        fen: str,
+        *,
+        multi_pv: int | None = None,
+        best_score_threshold: int | None = None,
+    ) -> LichessAnalysisApi:
+        return LichessAnalysisApi(
+            fen,
+            multi_pv=multi_pv or self.config.stockfish_multi_pv,
+            best_score_threshold=best_score_threshold
+            or self.config.stockfish_best_score_threshold,
+        )
+
+    def _analysis_provider_order(self) -> list[str]:
+        if self.config.analysis_providers:
+            return [name.lower() for name in self.config.analysis_providers if name]
+
+        provider = (
+            getattr(self.config, "analysis_provider", "stockfish") or "stockfish"
+        ).lower()
+        if provider == "hybrid":
+            return ["lichess", "stockfish"]
+        if provider not in {"stockfish", "lichess"}:
+            logger.warning(
+                "Unknown analysis_provider '%s'; defaulting to stockfish", provider
+            )
+            return ["stockfish"]
+        return [provider]
+
+    def _analysis_provider_fns(
+        self,
+    ) -> dict[str, Callable[[AnalysisTask], Awaitable[list[str]]]]:
+        return {
+            "lichess": self._run_lichess_provider,
+            "stockfish": self._run_stockfish_provider,
+        }
+
+    def _get_analysis_queue(self) -> AnalysisQueue:
+        order = self._analysis_provider_order()
+        if self._analysis_queue is None or self._analysis_order != order:
+            self._reset_analysis_counts()
+            self._analysis_queue = AnalysisQueue(
+                providers=self._analysis_provider_fns(),
+                order=order,
+                max_concurrency=4,
+                on_success=self._increment_analysis_count,
+            )
+            self._analysis_order = order
+        return self._analysis_queue
+
+    def _reset_analysis_counts(self) -> None:
+        self._analysis_counts = {"lichess": 0, "stockfish": 0}
+
+    def _increment_analysis_count(self, provider: str, task: AnalysisTask) -> None:  # noqa: ARG002
+        provider_key = provider.lower()
+        current = self._analysis_counts.get(provider_key, 0)
+        current += 1
+        self._analysis_counts[provider_key] = current
+        if current % 100 == 0:
+            logger.info(
+                "Analysis progress: lichess=%d stockfish=%d",
+                self._analysis_counts.get("lichess", 0),
+                self._analysis_counts.get("stockfish", 0),
+            )
+
+    async def _run_lichess_provider(self, task: AnalysisTask) -> list[str]:
+        api = self._lichess_api(
+            task.fen,
+            multi_pv=task.multi_pv,
+            best_score_threshold=task.best_score_threshold,
+        )
+        await api.raw_evaluation()
+        return api.best_moves
+
+    async def _run_stockfish_provider(self, task: AnalysisTask) -> list[str]:
+        api = self._stockfish_api(
+            task.fen,
+            multi_pv=task.multi_pv,
+            depth=task.depth,
+            best_score_threshold=task.best_score_threshold,
+        )
+        await api.raw_evaluation()
+        return api.best_moves
+
+    async def _analysis_best_moves(
+        self,
+        target_node: RepertoireNode,
+        *,
+        multi_pv: int | None = None,
+        depth: int | None = None,
+    ) -> list[str]:
+        task = AnalysisTask(
+            fen=target_node.fen,
+            multi_pv=multi_pv or self.config.stockfish_multi_pv,
+            depth=depth or self.config.stockfish_depth,
+            best_score_threshold=self.config.stockfish_best_score_threshold,
+        )
+        queue = self._get_analysis_queue()
+        return await queue.evaluate(task)
+
+    def _static_lichess_eval_best_moves(self, fens: list[str]) -> dict[str, list[str]]:
+        path = getattr(self.config, "lichess_eval_path", None)
+        if not path:
+            return {}
+
+        try:
+            results = _core.lookup_lichess_evals(path, fens)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Static Lichess eval lookup failed for %d positions: %s",
+                len(fens),
+                exc,
+            )
+            return {}
+
+        hits: dict[str, list[str]] = {}
+        for fen, payload in zip(fens, results):
+            if payload is None:
+                continue
+            try:
+                moves = _best_moves_from_eval_payload(
+                    payload,
+                    self.config.stockfish_best_score_threshold,
+                    self.config.stockfish_multi_pv,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(
+                    "Failed to parse static eval for %s: %s",
+                    fen,
+                    exc,
+                )
+                continue
+            if moves:
+                hits[fen] = moves
+        return hits
+
     def _resolve_pct(self, pct: float | None) -> float:
         return pct if pct is not None else self.config.explorer_pct
+
+    def _build_expansion_context(
+        self,
+        nodes: Iterable[RepertoireNode] | None,
+        max_concurrency: int | None,
+        progress_callback: Callable[[RepertoireNode], None] | None,
+    ) -> ExpansionContext | None:
+        targets = list(nodes or self.leaf_nodes)
+        if not targets:
+            return None
+
+        resolved_concurrency = max_concurrency or min(4, len(targets))
+        return ExpansionContext(
+            targets=targets,
+            max_concurrency=resolved_concurrency,
+            graph_lock=asyncio.Lock(),
+            progress_callback=progress_callback,
+        )
+
+    async def _run_expansion(
+        self,
+        context: ExpansionContext,
+        worker: Callable[[RepertoireNode, asyncio.Lock], Awaitable[list[str]]],
+        *,
+        error_handler: Callable[[Exception, RepertoireNode], list[str]] | None = None,
+    ) -> dict[str, list[str]]:
+        queue: asyncio.Queue[RepertoireNode] = asyncio.Queue()
+        for node in context.targets:
+            queue.put_nowait(node)
+
+        results: dict[str, list[str]] = {}
+
+        async def worker_task() -> None:
+            while True:
+                try:
+                    node = queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                try:
+                    moves = await worker(node, context.graph_lock)
+                    results[node.fen] = moves
+                    if context.progress_callback is not None:
+                        context.progress_callback(node)
+                except Exception as exc:  # noqa: BLE001
+                    if error_handler is None:
+                        raise
+                    results[node.fen] = error_handler(exc, node)
+                finally:
+                    queue.task_done()
+
+        workers = [
+            asyncio.create_task(worker_task()) for _ in range(context.max_concurrency)
+        ]
+        await queue.join()
+        await asyncio.gather(*workers, return_exceptions=True)
+        return results
 
     async def add_engine_variations_for_node(
         self,
         node: RepertoireNode | None = None,
         multi_pv: int | None = None,
         graph_lock: asyncio.Lock | None = None,
+        best_moves: list[str] | None = None,
     ) -> list[str]:
         """Attach engine candidate moves at the given node (default current) as PGN variations."""
 
         target_node = node or self.current_node
-        api = self._stockfish_api(target_node.fen, multi_pv=multi_pv)
-        await api.raw_evaluation()
+        moves_to_add = best_moves
+        if moves_to_add is None:
+            moves_to_add = await self._analysis_best_moves(
+                target_node,
+                multi_pv=multi_pv,
+            )
 
         base_board = chess.Board(target_node.fen)
         pgn_node = self._pgn_node_for(target_node)
         existing_moves = {var.move for var in pgn_node.variations}
         added_moves: list[str] = []
 
-        for uci_move in api.best_moves:
+        for uci_move in moves_to_add:
             try:
                 move = chess.Move.from_uci(uci_move)
             except ValueError:
@@ -448,40 +805,29 @@ class Repertoire:
     ) -> dict[str, list[str]]:
         """Expand all given (or leaf) nodes in parallel using a worker queue."""
 
-        targets = list(nodes or self.leaf_nodes)
-        if not targets:
+        context = self._build_expansion_context(
+            nodes,
+            max_concurrency,
+            progress_callback,
+        )
+        if context is None:
             return {}
 
-        max_concurrency = max_concurrency or min(4, len(targets))
-        graph_lock = asyncio.Lock()
-        queue: asyncio.Queue[RepertoireNode] = asyncio.Queue()
-        for node in targets:
-            queue.put_nowait(node)
+        static_hits: dict[str, list[str]] = {}
+        if context.targets:
+            static_hits = self._static_lichess_eval_best_moves(
+                [node.fen for node in context.targets]
+            )
 
-        results: dict[str, list[str]] = {}
+        async def worker(node: RepertoireNode, graph_lock: asyncio.Lock) -> list[str]:
+            return await self.add_engine_variations_for_node(
+                node=node,
+                multi_pv=multi_pv,
+                graph_lock=graph_lock,
+                best_moves=static_hits.get(node.fen),
+            )
 
-        async def worker() -> None:
-            while True:
-                try:
-                    node = queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    break
-                try:
-                    moves = await self.add_engine_variations_for_node(
-                        node=node,
-                        multi_pv=multi_pv,
-                        graph_lock=graph_lock,
-                    )
-                    results[node.fen] = moves
-                    if progress_callback is not None:
-                        progress_callback(node)
-                finally:
-                    queue.task_done()
-
-        workers = [asyncio.create_task(worker()) for _ in range(max_concurrency)]
-        await queue.join()
-        await asyncio.gather(*workers, return_exceptions=True)
-        return results
+        return await self._run_expansion(context, worker)
 
     async def add_explorer_variations_for_node(
         self,
@@ -547,60 +893,35 @@ class Repertoire:
         progress_callback: Callable[[RepertoireNode], None] | None = None,
     ) -> dict[str, list[str]]:
         """Expand nodes by fetching explorer moves via a worker queue."""
-        targets = list(nodes or self.leaf_nodes)
-        if not targets:
+        context = self._build_expansion_context(
+            nodes,
+            max_concurrency,
+            progress_callback,
+        )
+        if context is None:
             return {}
 
-        max_concurrency = max_concurrency or min(4, len(targets))
-        graph_lock = asyncio.Lock()
-        queue: asyncio.Queue[RepertoireNode] = asyncio.Queue()
-        for node in targets:
-            queue.put_nowait(node)
+        async def worker(node: RepertoireNode, graph_lock: asyncio.Lock) -> list[str]:
+            return await self.add_explorer_variations_for_node(
+                node=node,
+                pct=pct,
+                graph_lock=graph_lock,
+            )
 
-        results: dict[str, list[str]] = {}
+        def handle_error(exc: Exception, node: RepertoireNode) -> list[str]:
+            if isinstance(exc, httpx.HTTPStatusError):
+                status = exc.response.status_code if exc.response is not None else "?"
+                logger.warning(
+                    "Explorer API error (%s) while expanding %s: %s",
+                    status,
+                    node.fen,
+                    exc,
+                )
+            else:
+                logger.warning("Explorer expansion failed for %s: %s", node.fen, exc)
+            return []
 
-        async def worker() -> None:
-            while True:
-                try:
-                    node = queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    break
-                try:
-                    moves = await self.add_explorer_variations_for_node(
-                        node=node,
-                        pct=pct,
-                        graph_lock=graph_lock,
-                    )
-                    results[node.fen] = moves
-                    if progress_callback is not None:
-                        progress_callback(node)
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:
-                    if isinstance(exc, httpx.HTTPStatusError):
-                        status = (
-                            exc.response.status_code
-                            if exc.response is not None
-                            else "?"
-                        )
-                        logger.warning(
-                            "Explorer API error (%s) while expanding %s: %s",
-                            status,
-                            node.fen,
-                            exc,
-                        )
-                    else:
-                        logger.warning(
-                            "Explorer expansion failed for %s: %s", node.fen, exc
-                        )
-                    results[node.fen] = []
-                finally:
-                    queue.task_done()
-
-        workers = [asyncio.create_task(worker()) for _ in range(max_concurrency)]
-        await queue.join()
-        await asyncio.gather(*workers, return_exceptions=True)
-        return results
+        return await self._run_expansion(context, worker, error_handler=handle_error)
 
     async def expand_leaves_by_turn(
         self,
@@ -609,9 +930,17 @@ class Repertoire:
         pct: float | None = None,
         max_concurrency: int | None = None,
         max_player_moves: int | None = None,
+        min_games_reached: int | None = None,
         progress_callback: Callable[[RepertoireNode], None] | None = None,
     ) -> dict[str, list[str]]:
         """Expand leaf nodes, routing player turns to the engine and others to explorer."""
+        use_explorer = getattr(self.config, "explorer_enabled", True)
+
+        threshold = (
+            min_games_reached
+            if min_games_reached is not None
+            else self.config.min_games_reached
+        )
 
         leaves = self.leaf_nodes
         player_nodes: list[RepertoireNode] = []
@@ -624,9 +953,15 @@ class Repertoire:
             )
             player_counts = [self.player_move_count(node) for node in leaves]
             for node, is_player, count in zip(leaves, mask, player_counts):
+                if (
+                    threshold is not None
+                    and node.games_reached is not None
+                    and node.games_reached < threshold
+                ):
+                    continue
                 if max_player_moves is not None and count >= max_player_moves:
                     continue
-                if is_player:
+                if is_player or not use_explorer:
                     player_nodes.append(node)
                 else:
                     opponent_nodes.append(node)
@@ -655,6 +990,7 @@ class Repertoire:
 
     def export_pgn(self, filepath: str) -> None:
         """Export the repertoire PGN to the given file."""
+        self._sort_variations_by_reach(self.root_node, self.game)
         with open(filepath, "w", encoding="utf-8") as f:
             exporter = chess_pgn.FileExporter(f)
             self.game.accept(exporter)

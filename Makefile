@@ -6,7 +6,10 @@ lint:
 	cargo clippy --all-targets --all-features -- -D warnings
 
 test:
-	uv run pytest -vvx src/rep_grow/tests
+	uv run pytest --cov=src/rep_grow \
+		--cov-fail-under=96 \
+		-vvx \
+		src/rep_grow
 	cargo test --no-default-features
 	cargo test --release --no-default-features
 

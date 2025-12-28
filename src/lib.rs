@@ -1,5 +1,7 @@
+use pyo3::Py;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+use pyo3::types::PyAny;
 use pyo3::types::{PyDict, PyList};
 use pyo3::{Bound, FromPyObject};
 
@@ -14,7 +16,9 @@ use std::str::FromStr;
 
 mod stockfish;
 use stockfish::stockfish_evaluate;
+mod lichess_eval;
 pub mod study;
+pub use lichess_eval::{lookup_lichess_eval, lookup_lichess_evals};
 
 /// A Python module implemented in Rust.
 #[pymodule]
@@ -23,6 +27,8 @@ fn _core(_py: Python<'_>, m: Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(player_turn_mask, &m)?)?;
     m.add_function(wrap_pyfunction!(split_repertoire_nodes, &m)?)?;
     m.add_function(wrap_pyfunction!(canonicalize_fen, &m)?)?;
+    m.add_function(wrap_pyfunction!(lookup_lichess_eval_json, &m)?)?;
+    m.add_function(wrap_pyfunction!(lookup_lichess_evals_json, &m)?)?;
     m.add_function(wrap_pyfunction!(stockfish_evaluate, &m)?)?;
     Ok(())
 }
@@ -31,6 +37,42 @@ fn _core(_py: Python<'_>, m: Bound<'_, PyModule>) -> PyResult<()> {
 fn canonicalize_fen(fen_text: String) -> PyResult<String> {
     canonicalize_fen_str(&fen_text)
         .map_err(|err| PyValueError::new_err(format!("{err} (fen='{fen_text}')")))
+}
+
+fn value_to_py(py: Python<'_>, value: serde_json::Value) -> PyResult<Py<PyAny>> {
+    let json_mod = py.import("json")?;
+    let loads = json_mod.getattr("loads")?;
+    let serialized =
+        serde_json::to_string(&value).map_err(|err| PyValueError::new_err(format!("{err}")))?;
+    let obj = loads.call1((serialized,))?;
+    Ok(obj.unbind())
+}
+
+#[pyfunction(name = "lookup_lichess_eval")]
+fn lookup_lichess_eval_json(
+    py: Python<'_>,
+    dataset_path: String,
+    fen: String,
+) -> PyResult<Option<Py<PyAny>>> {
+    match lookup_lichess_eval(dataset_path, &fen) {
+        Ok(Some(v)) => Ok(Some(value_to_py(py, v)?)),
+        Ok(None) => Ok(None),
+        Err(err) => Err(PyValueError::new_err(format!("{err}"))),
+    }
+}
+
+#[pyfunction(name = "lookup_lichess_evals")]
+fn lookup_lichess_evals_json(
+    py: Python<'_>,
+    dataset_path: String,
+    fens: Vec<String>,
+) -> PyResult<Vec<Option<Py<PyAny>>>> {
+    let result = lookup_lichess_evals(dataset_path, &fens)
+        .map_err(|err| PyValueError::new_err(format!("{err}")))?;
+    result
+        .into_iter()
+        .map(|opt| opt.map(|v| value_to_py(py, v)).transpose())
+        .collect()
 }
 
 pub fn canonicalize_fen_str(fen_text: &str) -> Result<String, String> {

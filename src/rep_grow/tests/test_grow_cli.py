@@ -35,8 +35,8 @@ def stub_repertoire(monkeypatch):
             after_move = chess.Board()
             after_move.push_san("e4")
             self._leaf_nodes = [
-                SimpleNamespace(fen=start.fen()),
-                SimpleNamespace(fen=after_move.fen()),
+                SimpleNamespace(fen=start.fen(), games_reached=None),
+                SimpleNamespace(fen=after_move.fen(), games_reached=None),
             ]
             self.nodes_by_fen = {}
 
@@ -171,6 +171,22 @@ def test_cli_rejects_invalid_numeric_flags(cli_runner):
     assert result_engine_pool.exit_code == 2
     assert "--engine-pool-size" in result_engine_pool.output
 
+    result_min_games = cli_runner.invoke(
+        click_main,
+        [
+            "--side",
+            "white",
+            "--initial-san",
+            "e4",
+            "--engine-path",
+            engine_path,
+            "--min-games-reached",
+            "0",
+        ],
+    )
+    assert result_min_games.exit_code == 2
+    assert "--min-games-reached" in result_min_games.output
+
 
 def test_cli_initial_san_flow(cli_runner, tmp_path, stub_repertoire):
     engine_path = existing_binary()
@@ -198,7 +214,9 @@ def test_cli_initial_san_flow(cli_runner, tmp_path, stub_repertoire):
             "--explorer-pct",
             "92",
             "--explorer-min-game-share",
-            "0.02",
+            "2",
+            "--min-games-reached",
+            "50",
         ],
     )
     assert result.exit_code == 0, result.output
@@ -219,6 +237,7 @@ def test_cli_initial_san_flow(cli_runner, tmp_path, stub_repertoire):
     assert cfg.stockfish_best_score_threshold == 30
     assert cfg.explorer_pct == 92
     assert cfg.explorer_min_game_share == 0.02
+    assert cfg.min_games_reached == 50
 
 
 def test_cli_passes_max_player_moves(cli_runner, tmp_path, stub_repertoire):

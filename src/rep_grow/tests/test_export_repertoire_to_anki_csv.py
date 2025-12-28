@@ -1,14 +1,23 @@
 from __future__ import annotations
 
 import csv
+import types
 from pathlib import Path
+from typing import cast
 
 import chess
 from click.testing import CliRunner
 import pytest
 
 from rep_grow.fen import canonical_fen
-from rep_grow.export_repertoire_to_anki_csv import click_main
+from rep_grow.export_repertoire_to_anki_csv import (
+    _collect_san_lines,
+    _format_description,
+    _row_entries_from_lines,
+    _sorted_children,
+    click_main,
+)
+from rep_grow.repertoire import Repertoire, RepertoireNode
 
 
 @pytest.fixture
@@ -171,3 +180,107 @@ def test_exporter_includes_and_sorts_by_games_reached(tmp_path):
     move_lines = [row[3] for row in rows]
     assert move_lines[0].endswith("d6")  # highest count first
     assert move_lines[1].endswith("Bb5")
+
+
+def test_sorted_children_falls_back_to_uci_for_illegal_moves():
+    def raise_value_error(_move):
+        raise ValueError("illegal")
+
+    board = cast(chess.Board, types.SimpleNamespace(san=raise_value_error))
+    child = cast(RepertoireNode, types.SimpleNamespace())
+    node = cast(RepertoireNode, types.SimpleNamespace(children={"e2e4": child}))
+
+    result = _sorted_children(node, board)
+
+    assert result[0][0] == "e2e4"
+
+
+def test_collect_san_lines_skips_cycles_and_illegal_moves():
+    root_fen = chess.STARTING_FEN
+    root = cast(RepertoireNode, types.SimpleNamespace(children={}, fen=root_fen))
+    cycle_child = cast(RepertoireNode, types.SimpleNamespace(children={}, fen=root_fen))
+    illegal_child = cast(
+        RepertoireNode, types.SimpleNamespace(children={}, fen=root_fen)
+    )
+    # One child points back to the root (visited), one is illegal in the start position
+    root.children = {"e2e4": cycle_child, "e7e5": illegal_child}
+
+    repertoire = cast(Repertoire, types.SimpleNamespace(root_node=root))
+
+    lines = _collect_san_lines(repertoire)
+
+    assert lines == []
+
+
+def test_format_description_prefers_metadata_over_moves():
+    moves = ["e4", "e5", "Nf3"]
+
+    assert _format_description(moves, {"Variation": "French"}, 2) == "French"
+    assert _format_description(moves, {"Variation": "?", "ECO": "C00"}, 2) == "C00"
+    assert _format_description(moves, {}, 0) == ""
+
+
+def test_row_entries_skip_empty_moves_and_dedupe():
+    headers = {}
+    san_lines = [([], cast(RepertoireNode, types.SimpleNamespace(games_reached=0)))]
+
+    rows = _row_entries_from_lines(
+        san_lines,
+        headers=headers,
+        max_plies=2,
+        min_plies=None,
+        description_plies=2,
+        dedupe=False,
+    )
+
+    assert rows == []
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["--max-plies", "0"],
+        ["--min-plies", "-1"],
+        ["--max-plies", "1", "--min-plies", "2"],
+        ["--description-plies", "-1"],
+        ["--chunk-size", "0"],
+    ],
+)
+def test_exporter_rejects_invalid_numeric_flags(args, tmp_path, fixture_pgn_path):
+    runner = CliRunner()
+
+    result = runner.invoke(
+        click_main,
+        [
+            "--pgn-file",
+            str(fixture_pgn_path),
+            "--side",
+            "white",
+            "--output",
+            str(tmp_path / "out.csv"),
+            *args,
+        ],
+    )
+
+    assert result.exit_code == 2
+
+
+def test_exporter_handles_empty_repertoire(tmp_path):
+    runner = CliRunner()
+    empty_pgn = tmp_path / "empty.pgn"
+    empty_pgn.write_text("\n\n*", encoding="utf-8")
+
+    result = runner.invoke(
+        click_main,
+        [
+            "--pgn-file",
+            str(empty_pgn),
+            "--side",
+            "white",
+            "--output",
+            str(tmp_path / "empty.csv"),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "No lines to export" in result.output

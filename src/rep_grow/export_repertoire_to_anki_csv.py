@@ -72,26 +72,25 @@ def _format_description(
     return " ".join(moves[:description_plies])
 
 
-def _build_rows(
-    repertoire: Repertoire,
+def _limited_moves(moves: list[str], max_plies: int | None) -> list[str]:
+    return moves[:max_plies] if max_plies else moves
+
+
+def _row_entries_from_lines(
+    san_lines: Sequence[tuple[list[str], RepertoireNode]],
     *,
+    headers: dict[str, str],
     max_plies: int | None,
     min_plies: int | None,
     description_plies: int,
     dedupe: bool,
-    include_games_reached: bool,
-    sort_by_games_reached: bool,
-) -> list[list[str]]:
-    root_fen = canonical_fen(repertoire.root_node.fen)
-    san_lines = _collect_san_lines(repertoire)
-    headers = {str(key): str(value) for key, value in repertoire.game.headers.items()}
-
+) -> list[tuple[str, str, int]]:
     seen_moves: set[str] = set()
     rows: list[tuple[str, str, int]] = []
     min_required = max(min_plies or 0, 0)
 
     for san_moves, leaf_node in san_lines:
-        limited_moves = san_moves[:max_plies] if max_plies else san_moves
+        limited_moves = _limited_moves(san_moves, max_plies)
         if len(limited_moves) < min_required:
             continue
         moves_str = " ".join(limited_moves)
@@ -109,8 +108,18 @@ def _build_rows(
         games_reached = leaf_node.games_reached or 0
         rows.append((description, moves_str, games_reached))
 
+    return rows
+
+
+def _finalize_rows(
+    rows: list[tuple[str, str, int]],
+    *,
+    root_fen: str,
+    include_games_reached: bool,
+    sort_by_games_reached: bool,
+) -> list[list[str]]:
     if sort_by_games_reached:
-        rows.sort(key=lambda item: item[2], reverse=True)
+        rows = sorted(rows, key=lambda item: item[2], reverse=True)
 
     final_rows: list[list[str]] = []
     for idx, (description, moves_str, games_reached) in enumerate(rows, start=1):
@@ -120,6 +129,36 @@ def _build_rows(
         final_rows.append(row)
 
     return final_rows
+
+
+def _build_rows(
+    repertoire: Repertoire,
+    *,
+    max_plies: int | None,
+    min_plies: int | None,
+    description_plies: int,
+    dedupe: bool,
+    include_games_reached: bool,
+    sort_by_games_reached: bool,
+) -> list[list[str]]:
+    root_fen = canonical_fen(repertoire.root_node.fen)
+    san_lines = _collect_san_lines(repertoire)
+    headers = {str(key): str(value) for key, value in repertoire.game.headers.items()}
+    entries = _row_entries_from_lines(
+        san_lines,
+        headers=headers,
+        max_plies=max_plies,
+        min_plies=min_plies,
+        description_plies=description_plies,
+        dedupe=dedupe,
+    )
+
+    return _finalize_rows(
+        entries,
+        root_fen=root_fen,
+        include_games_reached=include_games_reached,
+        sort_by_games_reached=sort_by_games_reached,
+    )
 
 
 def _write_rows(rows: Iterable[list[str]], output_path: Path) -> None:

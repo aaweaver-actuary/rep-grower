@@ -66,3 +66,25 @@ def test_freq_cli_writes_file(tmp_path: Path):
 
     payload = json.loads(output_path.read_text(encoding="utf-8"))
     assert payload["rankings"]
+
+
+def test_freq_cli_stdout_compact_json(tmp_path: Path):
+    input_path = build_freq_fixture(tmp_path / "freq_input_stdout.pgn")
+
+    runner = CliRunner()
+    result = runner.invoke(
+        freq_cli,
+        [
+            str(input_path),
+            "--side",
+            "black",
+            "--indent",
+            "0",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    # indent=0 should emit compact JSON (no pretty spaces) to stdout
+    payload = json.loads(result.output)
+    assert payload["side"] == "black"
+    assert payload["rankings"]

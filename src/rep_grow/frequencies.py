@@ -64,9 +64,9 @@ def click_main(pgn_file: str, side: str, output: str, indent: int) -> None:
         click.echo(f"Wrote frequency map to {path}")
 
 
-def main() -> None:
+def main() -> None:  # pragma: no cover
     click_main(standalone_mode=True)
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
     main()

@@ -7,6 +7,60 @@ import pytest
 from rep_grow.lichess_explorer_api import ExplorerResponse, LichessExplorerApi
 
 
+@pytest.fixture(autouse=True)
+def stub_lichess_explorer_api(monkeypatch):
+    payload = {
+        "opening": None,
+        "white": 1200,
+        "draws": 300,
+        "black": 500,
+        "moves": [
+            {
+                "uci": "e2e4",
+                "san": "e4",
+                "white": 600,
+                "draws": 100,
+                "black": 200,
+                "opening": {"eco": "C20", "name": "KP"},
+            },
+            {
+                "uci": "d2d4",
+                "san": "d4",
+                "white": 400,
+                "draws": 100,
+                "black": 100,
+                "opening": None,
+            },
+            {
+                "uci": "c2c4",
+                "san": "c4",
+                "white": 200,
+                "draws": 100,
+                "black": 200,
+                "opening": None,
+            },
+        ],
+        "recentGames": [],
+        "topGames": [],
+    }
+
+    class StubClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def get(self, url, params=None, **kwargs):
+            request = httpx.Request("GET", url, params=params)
+            return httpx.Response(200, json=payload, request=request)
+
+    monkeypatch.setattr(httpx, "AsyncClient", StubClient)
+
+
 def _fake_api_with_moves(move_totals: list[tuple[str, int]]) -> LichessExplorerApi:
     api = LichessExplorerApi(fen="test")
     moves: list[dict] = []

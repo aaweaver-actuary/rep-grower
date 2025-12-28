@@ -216,6 +216,51 @@ def test_repertoire_is_player_turn():
     )
 
 
+def test_export_orders_mainline_by_reach(tmp_path):
+    rep = Repertoire(side=chess.WHITE, initial_san="")
+    rep.play_initial_moves()
+
+    root = rep.root_node
+    e4 = rep.branch_from(root, ["e4"])
+    d4 = rep.branch_from(root, ["d4"])
+
+    e4.games_reached = 200
+    d4.games_reached = 120
+
+    e4e5 = rep.branch_from(e4, ["e5"])
+    e4c5 = rep.branch_from(e4, ["c5"])
+    e4e5.games_reached = 150
+    e4c5.games_reached = 60
+
+    d4d5 = rep.branch_from(d4, ["d5"])
+    d4Nf6 = rep.branch_from(d4, ["Nf6"])
+    d4d5.games_reached = 80
+    d4Nf6.games_reached = 40
+
+    output = tmp_path / "sorted.pgn"
+    rep.export_pgn(str(output))
+
+    with output.open() as handle:
+        game = chess_pgn.read_game(handle)
+
+    assert game is not None
+
+    top_level_moves = [var.san() for var in game.variations]
+    assert top_level_moves[:2] == ["e4", "d4"]
+
+    e4_line = game.variations[0]
+    e4_responses = [var.san() for var in e4_line.variations]
+    assert e4_responses[:2] == ["e5", "c5"]
+
+    d4_line = game.variations[1]
+    d4_responses = [var.san() for var in d4_line.variations]
+    assert d4_responses[:2] == ["d5", "Nf6"]
+
+    lines = _collect_pgn_lines(game)
+    assert lines[0][:2] == ["e4", "e5"]
+    assert ["d4", "d5"] in [line[:2] for line in lines]
+
+
 @pytest.mark.parametrize("side", [chess.WHITE, chess.BLACK])
 def test_repertoire_fen_after_no_moves(side):
     initial_san = ""
@@ -273,6 +318,117 @@ async def test_raw_evaluation(fake_stockfish):
 
     moves = await rep.get_engine_moves()
     assert moves == fake_stockfish.moves_to_return
+
+
+@pytest.mark.asyncio
+async def test_uses_lichess_when_configured(monkeypatch):
+    calls = {"lichess": 0}
+
+    class StubLichess:
+        def __init__(
+            self,
+            fen,
+            multi_pv=10,
+            variant="standard",
+            best_score_threshold=20,
+            request=None,
+            **kwargs,  # noqa: D401, ARG002
+        ):
+            calls["lichess"] += 1
+            self.best_moves = ["b1c3"]
+
+        async def raw_evaluation(self):  # pragma: no cover - trivial stub
+            return self
+
+    class FailStockfish:
+        def __init__(self, *args, **kwargs):  # noqa: D401, ARG002
+            raise AssertionError("Stockfish should not be used when provider=lichess")
+
+    monkeypatch.setattr("rep_grow.repertoire.LichessAnalysisApi", StubLichess)
+    monkeypatch.setattr("rep_grow.repertoire.StockfishAnalysisApi", FailStockfish)
+
+    config = RepertoireConfig(analysis_provider="lichess")
+    rep = Repertoire(side=chess.WHITE, initial_san="", config=config)
+    rep.play_initial_moves()
+
+    moves = await rep.get_engine_moves()
+
+    assert moves == ["b1c3"]
+    assert calls["lichess"] == 1
+
+
+@pytest.mark.asyncio
+async def test_hybrid_falls_back_to_stockfish(monkeypatch):
+    calls = {"lichess": 0, "stockfish": 0}
+
+    class FailingLichess:
+        def __init__(self, *args, **kwargs):  # noqa: D401, ARG002
+            calls["lichess"] += 1
+            self.best_moves: list[str] = []
+
+        async def raw_evaluation(self):
+            raise RuntimeError("cloud unavailable")
+
+    class StubStockfish:
+        def __init__(self, fen, multi_pv=10, **kwargs):  # noqa: D401, ARG002
+            calls["stockfish"] += 1
+            self.fen = fen
+            self.best_moves = ["a2a4"]
+
+        async def raw_evaluation(self):  # pragma: no cover - trivial stub
+            return self
+
+    monkeypatch.setattr("rep_grow.repertoire.LichessAnalysisApi", FailingLichess)
+    monkeypatch.setattr("rep_grow.repertoire.StockfishAnalysisApi", StubStockfish)
+
+    config = RepertoireConfig(analysis_provider="hybrid")
+    rep = Repertoire(side=chess.WHITE, initial_san="", config=config)
+    rep.play_initial_moves()
+
+    moves = await rep.get_engine_moves()
+
+    assert moves == ["a2a4"]
+    assert calls["lichess"] == 1
+    assert calls["stockfish"] == 1
+
+
+@pytest.mark.asyncio
+async def test_custom_provider_order_supports_third_engine(monkeypatch):
+    calls = {"custom": 0, "stockfish": 0}
+
+    async def custom_provider(task):  # noqa: ARG001
+        calls["custom"] += 1
+        return ["h2h4"]
+
+    class StubStockfish:
+        def __init__(self, fen, multi_pv=10, **kwargs):  # noqa: D401, ARG002
+            calls["stockfish"] += 1
+            self.fen = fen
+            self.multi_pv = multi_pv
+            self.best_moves = ["a2a4"]
+
+        async def raw_evaluation(self):  # pragma: no cover - trivial stub
+            return self
+
+    def provider_fns(self):  # type: ignore[override]
+        base = {"stockfish": self._run_stockfish_provider}
+        base["custom"] = custom_provider
+        return base
+
+    monkeypatch.setattr("rep_grow.repertoire.StockfishAnalysisApi", StubStockfish)
+    monkeypatch.setattr(
+        Repertoire, "_analysis_provider_fns", provider_fns, raising=False
+    )
+
+    config = RepertoireConfig(analysis_providers=["custom", "stockfish"])
+    rep = Repertoire(side=chess.WHITE, initial_san="", config=config)
+    rep.play_initial_moves()
+
+    moves = await rep.get_engine_moves()
+
+    assert moves == ["h2h4"]
+    assert calls["custom"] == 1
+    assert calls["stockfish"] == 0
 
 
 @pytest.mark.asyncio
@@ -641,54 +797,242 @@ async def test_expand_leaves_by_turn_respects_max_player_moves(fake_stockfish):
     deep_moves = {deep_board.san(var.move) for var in deep_pgn.variations}
     assert "a4" not in deep_moves
 
-    @pytest.mark.asyncio
-    async def test_repertoire_config_applies_context(monkeypatch):
-        captured: dict[str, float | int] = {}
 
-        class StubStockfish:
-            def __init__(
-                self,
-                fen,
-                multi_pv,
-                variant="standard",
-                engine_path=None,
-                depth=20,
-                think_time=None,
-                best_score_threshold=20,
-            ):
-                captured["multi_pv"] = multi_pv
-                captured["threshold"] = best_score_threshold
-                self.best_moves: list[str] = []
+@pytest.mark.asyncio
+async def test_expand_leaves_by_turn_skips_low_reach_nodes(monkeypatch):
+    rep = Repertoire(
+        side=chess.WHITE,
+        initial_san="",
+        config=RepertoireConfig(min_games_reached=50),
+    )
+    rep.play_initial_moves()
 
-            async def raw_evaluation(self):  # pragma: no cover - trivial stub
-                return None
+    high_opponent = rep.branch_from(rep.root_node, ["d4"])
+    low_opponent = rep.branch_from(rep.root_node, ["c4"])
+    high_player = rep.branch_from(rep.root_node, ["e4", "e5"])
+    low_player = rep.branch_from(rep.root_node, ["Nf3", "d5"])
 
-        class StubExplorer:
-            def __init__(self, fen, **kwargs):
-                self.fen = fen
+    high_opponent.games_reached = 120
+    low_opponent.games_reached = 10
+    high_player.games_reached = 80
+    low_player.games_reached = 5
 
-            async def raw_explorer(self):  # pragma: no cover - trivial stub
-                return None
+    captured: dict[str, list[RepertoireNode]] = {"engine": [], "explorer": []}
 
-            def top_p_pct_moves(self, pct, max_moves=None, min_game_share=None):
-                captured["explorer_pct"] = pct
-                return []
+    async def fake_engine(self, nodes=None, **kwargs):  # pragma: no cover - test hook
+        captured["engine"] = list(nodes or [])
+        return {}
 
-        monkeypatch.setattr("rep_grow.repertoire.StockfishAnalysisApi", StubStockfish)
-        monkeypatch.setattr("rep_grow.repertoire.LichessExplorerApi", StubExplorer)
+    async def fake_explorer(self, nodes=None, **kwargs):  # pragma: no cover - test hook
+        captured["explorer"] = list(nodes or [])
+        return {}
 
-        config = RepertoireConfig(
-            stockfish_multi_pv=4,
-            stockfish_best_score_threshold=25,
-            explorer_pct=95.0,
-        )
+    monkeypatch.setattr(
+        rep,
+        "add_engine_variations",
+        fake_engine.__get__(rep, Repertoire),
+    )
+    monkeypatch.setattr(
+        rep,
+        "add_explorer_variations",
+        fake_explorer.__get__(rep, Repertoire),
+    )
 
-        rep = Repertoire(side=chess.WHITE, initial_san="e4 e5", config=config)
-        rep.play_initial_moves()
-        rep.branch_from(rep.root_node, ["Nf3"])
+    await rep.expand_leaves_by_turn()
 
-        await rep.expand_leaves_by_turn()
+    engine_fens = {node.fen for node in captured["engine"]}
+    explorer_fens = {node.fen for node in captured["explorer"]}
 
-        assert captured["multi_pv"] == 4
-        assert captured["threshold"] == 25
-        assert captured["explorer_pct"] == 95.0
+    assert engine_fens == {high_player.fen}
+    assert explorer_fens == {high_opponent.fen}
+
+
+@pytest.mark.asyncio
+async def test_expand_leaves_by_turn_stockfish_handles_opponent_nodes(fake_stockfish):
+    fake_stockfish.moves_to_return = ["g8f6"]
+
+    rep = Repertoire(
+        side=chess.WHITE,
+        initial_san="",
+        config=RepertoireConfig(explorer_enabled=False),
+    )
+    rep.play_initial_moves()
+
+    opponent_node = rep.branch_from(rep.root_node, ["e4"])  # black to move (opponent)
+
+    await rep.expand_leaves_by_turn()
+
+    board = chess.Board(opponent_node.fen)
+    pgn_node = rep._mainline_node(opponent_node)
+    moves = {board.san(var.move) for var in pgn_node.variations}
+
+    assert "Nf6" in moves
+
+
+@pytest.mark.asyncio
+async def test_expand_leaves_by_turn_skip_explorer_when_disabled(monkeypatch):
+    rep = Repertoire(
+        side=chess.WHITE,
+        initial_san="",
+        config=RepertoireConfig(explorer_enabled=False, analysis_provider="hybrid"),
+    )
+    rep.play_initial_moves()
+
+    called = {"explorer": 0, "engine": 0}
+
+    async def fake_engine(self, nodes=None, **kwargs):  # pragma: no cover - hook
+        called["engine"] += 1
+        return {}
+
+    async def fake_explorer(
+        self, nodes=None, **kwargs
+    ):  # pragma: no cover - should skip
+        called["explorer"] += 1
+        return {}
+
+    monkeypatch.setattr(
+        rep, "add_engine_variations", fake_engine.__get__(rep, Repertoire)
+    )
+    monkeypatch.setattr(
+        rep, "add_explorer_variations", fake_explorer.__get__(rep, Repertoire)
+    )
+
+    await rep.expand_leaves_by_turn()
+
+    assert called["engine"] == 1
+    assert called["explorer"] == 0
+
+
+@pytest.mark.asyncio
+async def test_static_lichess_eval_prefetches_and_skips_providers(monkeypatch):
+    calls = {"lookup": 0, "provider": 0}
+
+    def fake_lookup(path, fens):  # pragma: no cover - small test hook
+        calls["lookup"] += 1
+        return [{"pvs": [{"cp": 30, "moves": ["e2e4"]}]} for _ in fens]
+
+    async def fake_best(
+        self, target_node, multi_pv=None, depth=None
+    ):  # pragma: no cover - small test hook
+        calls["provider"] += 1
+        return ["a2a4"]
+
+    monkeypatch.setattr("rep_grow.repertoire._core.lookup_lichess_evals", fake_lookup)
+    monkeypatch.setattr(
+        Repertoire,
+        "_analysis_best_moves",
+        fake_best,
+        raising=False,
+    )
+
+    rep = Repertoire(
+        side=chess.WHITE,
+        initial_san="",
+        config=RepertoireConfig(lichess_eval_path="/tmp/lichess_db_eval.jsonl.zst"),
+    )
+    rep.play_initial_moves()
+
+    await rep.add_engine_variations(nodes=[rep.root_node])
+
+    board = chess.Board(rep.root_node.fen)
+    pgn_node = rep._pgn_node_for(rep.root_node)
+    moves = {board.san(var.move) for var in pgn_node.variations}
+
+    assert "e4" in moves
+    assert calls["lookup"] == 1
+    assert calls["provider"] == 0
+
+
+@pytest.mark.asyncio
+async def test_static_lichess_eval_falls_back_to_provider(monkeypatch):
+    calls = {"lookup": 0, "provider": 0}
+
+    def fake_lookup(path, fens):  # pragma: no cover - small test hook
+        calls["lookup"] += 1
+        return [None for _ in fens]
+
+    async def fake_best(
+        self, target_node, multi_pv=None, depth=None
+    ):  # pragma: no cover - small test hook
+        calls["provider"] += 1
+        return ["a2a4"]
+
+    monkeypatch.setattr("rep_grow.repertoire._core.lookup_lichess_evals", fake_lookup)
+    monkeypatch.setattr(
+        Repertoire,
+        "_analysis_best_moves",
+        fake_best,
+        raising=False,
+    )
+
+    rep = Repertoire(
+        side=chess.WHITE,
+        initial_san="",
+        config=RepertoireConfig(lichess_eval_path="/tmp/lichess_db_eval.jsonl.zst"),
+    )
+    rep.play_initial_moves()
+
+    await rep.add_engine_variations(nodes=[rep.root_node])
+
+    board = chess.Board(rep.root_node.fen)
+    pgn_node = rep._pgn_node_for(rep.root_node)
+    moves = {board.san(var.move) for var in pgn_node.variations}
+
+    assert "a4" in moves
+    assert calls["lookup"] == 1
+    assert calls["provider"] == 1
+
+
+@pytest.mark.asyncio
+async def test_repertoire_config_applies_context(monkeypatch):
+    captured: dict[str, float | int] = {}
+
+    class StubStockfish:
+        def __init__(
+            self,
+            fen,
+            multi_pv,
+            variant="standard",
+            engine_path=None,
+            depth=20,
+            think_time=None,
+            best_score_threshold=20,
+            pool_size=None,
+            **_,
+        ):
+            captured["multi_pv"] = multi_pv
+            captured["threshold"] = best_score_threshold
+            self.best_moves: list[str] = []
+
+        async def raw_evaluation(self):  # pragma: no cover - trivial stub
+            return None
+
+    class StubExplorer:
+        def __init__(self, fen, **kwargs):
+            self.fen = fen
+
+        async def raw_explorer(self):  # pragma: no cover - trivial stub
+            return None
+
+        def top_p_pct_moves(self, pct, max_moves=None, min_game_share=None):
+            captured["explorer_pct"] = pct
+            return []
+
+    monkeypatch.setattr("rep_grow.repertoire.StockfishAnalysisApi", StubStockfish)
+    monkeypatch.setattr("rep_grow.repertoire.LichessExplorerApi", StubExplorer)
+
+    config = RepertoireConfig(
+        stockfish_multi_pv=4,
+        stockfish_best_score_threshold=25,
+        explorer_pct=95.0,
+    )
+
+    rep = Repertoire(side=chess.WHITE, initial_san="e4 e5", config=config)
+    rep.play_initial_moves()
+    rep.branch_from(rep.root_node, ["Nf3"])
+
+    await rep.expand_leaves_by_turn()
+
+    assert captured["multi_pv"] == 4
+    assert captured["threshold"] == 25
+    assert captured["explorer_pct"] == 95.0

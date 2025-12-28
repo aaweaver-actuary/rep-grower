@@ -21,3 +21,6 @@ def stockfish_evaluate(
     think_time: float | None,
     pool_size: int,
 ) -> Dict[str, Any]: ...
+def lookup_lichess_evals(
+    path: str, fens: Sequence[str]
+) -> List[Dict[str, Any] | None]: ...

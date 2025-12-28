@@ -1,28 +1,26 @@
 from __future__ import annotations
 
 import chess
+import pytest
 
 from rep_grow.fen import canonical_fen
 from rep_grow.repertoire import Repertoire, RepertoireNode
-from rep_grow.repertoire_pruner import MoveFingerprint, RepertoirePruner
+from rep_grow.repertoire_pruner import MoveFingerprint, PreferenceSet, RepertoirePruner
 
 
-def build_sample_repertoire() -> Repertoire:
-    rep = Repertoire(side=chess.WHITE, initial_san="")
-    rep.play_initial_moves()
-
-    root = rep.root_node
-    # Four representative player lines to provide overlapping moves.
-    rep.branch_from(root, ["e4", "e5", "Nf3", "Nc6", "Bb5"])
-    rep.branch_from(root, ["e4", "c5", "Nf3", "d6", "d4"])
-    rep.branch_from(root, ["d4", "d5", "c4", "Nc6", "Nc3"])
-    rep.branch_from(root, ["Nf3", "d5", "g3"])
-
-    return rep
+@pytest.fixture
+def sample_repertoire(repertoire_factory) -> Repertoire:
+    branches = [
+        ["e4", "e5", "Nf3", "Nc6", "Bb5"],
+        ["e4", "c5", "Nf3", "d6", "d4"],
+        ["d4", "d5", "c4", "Nc6", "Nc3"],
+        ["Nf3", "d5", "g3"],
+    ]
+    return repertoire_factory(branches=branches)
 
 
-def test_move_frequencies_count_each_player_edge():
-    rep = build_sample_repertoire()
+def test_move_frequencies_count_each_player_edge(sample_repertoire: Repertoire):
+    rep = sample_repertoire
     pruner = RepertoirePruner(rep)
 
     counts = pruner.player_move_frequencies()
@@ -136,7 +134,9 @@ def test_preferred_move_labels_are_normalized():
     rep.branch_from(root, ["e4", "c5", "Nc3"])
     rep.branch_from(root, ["Nf3", "d5", "g3"])
 
-    pruner = RepertoirePruner(rep, preferred_moves={"  nf3+  "})
+    pruner = RepertoirePruner(
+        rep, preferred_moves=PreferenceSet.from_iterable({"  nf3+  "})
+    )
     selection = pruner.player_move_selection()
 
     assert selection[root.fen]["san"] == "Nf3"

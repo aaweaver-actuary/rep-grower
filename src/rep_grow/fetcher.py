@@ -37,9 +37,9 @@ class CachedFetcher(ABC, Generic[Ctx, Resp]):
     @abstractmethod
     def _hydrate(self, payload: dict[str, Any]) -> Resp:
         """Convert cached payload into a response object."""
-        raise NotImplementedError
+        raise NotImplementedError  # pragma: no cover
 
     @abstractmethod
     def _serialize(self, response: Resp) -> dict[str, Any]:
         """Convert response into cacheable payload."""
-        raise NotImplementedError
+        raise NotImplementedError  # pragma: no cover

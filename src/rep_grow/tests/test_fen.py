@@ -25,3 +25,11 @@ def test_same_position_ignores_move_counters():
 
     assert same_position(noisy_fen, chess.STARTING_FEN)
     assert canonical_fen(noisy_fen) == canonical_fen(chess.STARTING_FEN)
+
+
+def test_start_fen_accepts_bool_true():
+    # Ensure the bool path matches the Color branch
+    start_bool = start_fen(True)
+    start_color = start_fen(chess.WHITE)
+
+    assert start_bool == start_color

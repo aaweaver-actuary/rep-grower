@@ -98,6 +98,29 @@ Highlights:
 	with counts and SAN deltas.
 - Every pass exports `INITIAL_SAN__iteration_N.pgn` plus a final consolidated PGN.
 
+### `build` CLI
+
+Loop growth and pruning to keep the tree manageable while marching toward a
+target hero-move depth.
+
+```bash
+build \
+	--side white \
+	--initial-san "e4 e5 Nf3" \
+	--initial-iterations 4 \
+	--iterations-per-cycle 2 \
+	--target-hero-moves 10 \
+	--min-games-stop 1000 \
+	--engine-depth 18 \
+	--engine-multi-pv 12
+```
+
+- Runs an initial grow block, prunes to a single hero move per node, then
+	repeats grow→prune until all remaining player-turn leaves hit
+	`--target-hero-moves` or have `games_reached` below `--min-games-stop`.
+- Exports each grow iteration plus per-cycle pruned PGNs and a final
+	`__build_final.pgn`.
+
 ### `prune` CLI
 
 Reduce a PGN to the single highest-frequency player move per node:
